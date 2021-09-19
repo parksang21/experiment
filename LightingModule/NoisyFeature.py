@@ -171,6 +171,9 @@ class NoisyFeature(LightningModule):
         
         return loss
     
+    def on_validation_end(self) -> None:
+        return super().on_validation_end()
+    
     def configure_optimizers(self):
         return torch.optim.SGD(self.model.parameters(), lr=self.lr, momentum=0.9, weight_decay=1e-4)
         
