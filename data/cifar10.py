@@ -38,8 +38,46 @@ class SeperateDatasets(torchvision.datasets.CIFAR10):
 
         seperate_image = torch.stack([seperate_list[i] for i in idx_shuffle], dim=0)
         return (img, target), (seperate_image, idx_shuffle)
+    
 
+class OpenTestCifar10(torchvision.datasets.CIFAR10):
+    def __init__(self, 
+                 root: str='/datasets',
+                 train: bool=False,
+                 transform: Optional[Callable]=None,
+                 target_tarsnform: Optional[Callable]=None,
+                 download: bool=False,
+                 split: list=None) -> None:
+        super(OpenTestCifar10, self).__init__(root, train=train, transform=transform, 
+                                              target_transform=target_tarsnform, 
+                                              download=download)
+        self.split_idx = None
+        assert split, 'split is requried'
+        self.set_split(split)
+        
+    def __getitem__(self, index: int) -> Tuple[Any, Any]:
+        
+        img, target = self.data[index], self.targets[index]
+        img = Image.fromarray(img)
+        
+        if self.transform is not None:
+            img = self.transform(img)
+        if self.target_transform is not None:
+            target = self.target_transform(target)
+            
+        known_target = True if target in self.split else False
+        tTarget = self.split.index(target) if target in self.split else -1
+        
+        return img, tTarget, target, known_target
+    
+    def set_split(self, split):
+        self.split = split
+        np_target = np.array(self.targets)
+        split_idxs = np.isin(np_target, split)
+        np_target = np.where(split_idxs == True)[0]
 
+        self.split_idx = np_target
+        
 
 class SplitCifar10(torchvision.datasets.CIFAR10):
     def __init__(self,
@@ -57,7 +95,7 @@ class SplitCifar10(torchvision.datasets.CIFAR10):
         self.split_idx = None
         self.split = split
         if not self.split is None:
-            self.set_split()
+            self.set_split(self.split)
 
     def set_split(self, split):
         self.split = split
