@@ -1,11 +1,14 @@
 from pytorch_lightning import LightningModule
 from argparse import ArgumentParser
+from pytorch_lightning.trainer import optimizers
 
 import torch
 from torch import nn
 from torch.utils.data.dataloader import DataLoader
+from torchvision.datasets.cifar import CIFAR10
+from torchmetrics import AUROC
 
-from data.cifar10 import SplitCifar10, train_transform, val_transform
+from data.cifar10 import SplitCifar10, train_transform, val_transform, OpenTestCifar10
 from data.capsule_split import get_splits
 from utils import accuracy
 
@@ -115,9 +118,11 @@ class classifier32(nn.Module):
         return y, []
 
 
-class NoisyFeature(LightningModule):
+class NoiseInjection(LightningModule):
     def __init__(self,
                  lr: float = 0.01,
+                 momentum: float = 0.9,
+                 weight_decay: float = 1e-4,
                  data_dir: str = '/datasets',
                  dataset: str = 'cifar10',
                  batch_size: int = 128,
@@ -129,6 +134,8 @@ class NoisyFeature(LightningModule):
         
         self.save_hyperparameters()
         self.lr = lr
+        self.momentum = momentum
+        self.weight_decay = weight_decay
         self.data_dir = data_dir
         self.dataset = dataset
         self.batch_size = batch_size
@@ -136,8 +143,9 @@ class NoisyFeature(LightningModule):
         self.class_split = class_split
         self.splits = get_splits(dataset, class_split)
         
-        self.model = classifier32(num_classes=6)
+        self.model = classifier32(num_classes=len(self.splits['known_classes']))
         self.criterion = nn.CrossEntropyLoss()
+        self.auroc = AUROC(pos_label=1)
     
     def forward(self, x, return_features=[]):
         logit, features = self.model(x, return_features)
@@ -158,14 +166,20 @@ class NoisyFeature(LightningModule):
         return loss
     
     def validation_step(self, batch, batch_idx):
-        x, y = batch
+        x, train_y, y, known_idxs = batch
+       
         logit, features = self(x, return_features=[])
         
-        loss = self.criterion(logit, y)
+        loss = self.criterion(logit[known_idxs], train_y[known_idxs])
         
-        top1k = accuracy(logit, y, topk=(1,))[0]
+        soft_max_logit = torch.softmax(logit, dim=-1)
+        soft_max_auroc = self.auroc(soft_max_logit.max(1)[0], known_idxs.long())
+        logit_auroc = self.auroc(logit.max(1)[0], known_idxs.long())
         
-        log_dict = {'val_loss': loss, 'val_acc': top1k}
+        top1k = accuracy(logit[known_idxs], train_y[known_idxs], topk=(1,))[0]
+        
+        log_dict = {'val_loss': loss, 'val_acc': top1k,
+                    'softmax': soft_max_auroc, 'logit': logit_auroc}
         
         self.log_dict(log_dict)
         
@@ -175,9 +189,18 @@ class NoisyFeature(LightningModule):
         return super().on_validation_end()
     
     def configure_optimizers(self):
-        return torch.optim.SGD(self.model.parameters(), lr=self.lr, momentum=0.9, weight_decay=1e-4)
+        optimizer = torch.optim.SGD(self.model.parameters(), lr=self.lr, momentum=self.momentum, 
+                                     weight_decay=self.weight_decay)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=20)
         
-    
+        return {
+            'optimizer': optimizer,
+            'lr_scheduler': {
+                'scheduler': scheduler,
+                'monitor': 'val_loss'
+            }
+        }
+        
     def train_dataloader(self):
         
         if self.dataset == 'cifar10':
@@ -189,17 +212,10 @@ class NoisyFeature(LightningModule):
     
     def val_dataloader(self):
         if self.dataset == 'cifar10':
-            known_dataset = SplitCifar10(self.data_dir, train=False, transform=val_transform)
-            known_dataset.set_split(self.splits['known_classes'])
-            unknown_dataset = SplitCifar10(self.data_dir, train=False, transform=val_transform)
-            unknown_dataset.set_split(self.splits['unknown_classes'])
-            known_loader = DataLoader(known_dataset, batch_size=self.batch_size, 
-                                      num_workers=self.num_workers)
-            unknown_loader = DataLoader(unknown_dataset, batch_size=self.batch_size,
-                                        num_workers=self.num_workers)
-        
-        # return [known_loader, unknown_loader]
-        return known_loader
+            dataset = OpenTestCifar10(self.data_dir, train=False,
+                                      transform=val_transform, split=self.splits['known_classes'])
+            
+        return DataLoader(dataset, batch_size=self.batch_size, num_workers=self.num_workers)
     
     @staticmethod
     def add_model_specific_args(parent_parser):
@@ -207,6 +223,8 @@ class NoisyFeature(LightningModule):
         
         parser.add_argument("--lr", type=float, default=1e-4)
         parser.add_argument("--latent_dim", type=int, default=128)
+        parser.add_argument("--momentum", type=float, default=0.9)
+        parser.add_argument("--weight_decay", type=float, default=1e-4)
 
         parser.add_argument("--batch_size", type=int, default=256)
         parser.add_argument("--num_workers", type=int, default=48)

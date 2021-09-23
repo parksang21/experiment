@@ -1,8 +1,11 @@
 from LightingModule.VAE import VAE
-from LightingModule.NoisyFeature import NoisyFeature
+from LightingModule.BaseClassifier import BaseClassifier
+from LightingModule.NoiseInjection import NoiseInjection
 
 
 model_dict = {
     'vae': VAE,
-    'noisyFeature': NoisyFeature
+    'BaseClassifier': BaseClassifier,
+    'NoiseInjection': NoiseInjection
+    
 }
