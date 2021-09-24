@@ -12,9 +12,55 @@ from data.cifar10 import SplitCifar10, train_transform, val_transform, OpenTestC
 from data.capsule_split import get_splits
 from utils import accuracy
 
+class NoiseLayer(nn.Module):
+    def __init__(self, alpha, num_classes):
+        super(NoiseLayer, self).__init__()
+        self.alpha = alpha
+        self.num_classes = torch.arange(num_classes)
+        
+    def calculate_class_mean(self, 
+                           x: torch.Tensor, 
+                           y: torch.Tensor):
+        """calculate the variance of each classes' noise
+
+        Args:
+            x (torch.Tensor): [input tensor]
+            y (torch.Tensor): [target tensor]
+
+        Returns:
+            [Tensor]: [returns class dependent noise variance]
+        """
+        self.num_classes = self.num_classes.type_as(y)
+        idxs = y.unsqueeze(0) == self.num_classes.unsqueeze(1)
+        mean = []
+        std = []
+        for i in range(self.num_classes.shape[0]):
+            x_ = x[idxs[i]]
+            mean.append(x_.mean(0))
+            std.append(x_.std(0))
+        
+        return torch.stack(mean), torch.stack(std)
+    
+    def forward(self, x, y):
+        batch_size = x.size(0)
+        class_mean, class_var = self.calculate_class_mean(x, y)
+        
+        # class_noise = torch.normal(class_mean, class_var).type_as(y).detach()
+        # class_noise = torch.normal(mean=class_mean, std=class_var).type_as(x).detach()
+        class_noise = torch.normal(mean=0., std=class_var).type_as(x).detach()
+
+        index = torch.randperm(batch_size).type_as(y)
+        newY = y[index]
+        mask = y != newY
+        if x.dim() == 2:
+            mask = mask.unsqueeze(1).expand_as(x).type_as(x)
+        else:
+            mask = mask[...,None,None,None].expand_as(x).type_as(x)
+        
+        return x + self.alpha * class_noise[newY], newY
+
 def weights_init(m):
     classname = m.__class__.__name__
-    # TODO: what about fully-connected layers?
     if classname.find('Conv') != -1:
         m.weight.data.normal_(0.0, 0.05)
     elif classname.find('BatchNorm') != -1:
@@ -22,9 +68,8 @@ def weights_init(m):
         m.bias.data.fill_(0)
 
 class classifier32(nn.Module):
-    def __init__(self, num_classes=2, **kwargs):
+    def __init__(self, num_classes=2, alpha=0.5, **kwargs):
         super(self.__class__, self).__init__()
-        # 이거 왜 필요한지 모르겠다.
         self.num_classes = num_classes
         self.conv1 = nn.Conv2d(3,       64,     3, 1, 1, bias=False)
         self.conv2 = nn.Conv2d(64,      64,     3, 1, 1, bias=False)
@@ -57,8 +102,9 @@ class classifier32(nn.Module):
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
 
         self.apply(weights_init)
+        self.noiseLayer = NoiseLayer(alpha, num_classes)
 
-    def forward(self, x, return_features=[]):
+    def forward(self, x, y, return_features=[], noise=[]):
         batch_size = len(x)
         out_feat = []
 
@@ -75,6 +121,9 @@ class classifier32(nn.Module):
         
         if 0 in return_features:
             out_feat.append(l1)
+            
+        if 0 in noise:
+            l1, ny = self.noiseLayer(l1, y)
 
         x = self.dr2(l1)
         x = self.conv4(x)
@@ -89,6 +138,9 @@ class classifier32(nn.Module):
         
         if 1 in return_features:
             out_feat.append(l2)
+            
+        if 1 in noise:
+            l2, ny = self.noiseLayer(l2, y)
 
         x = self.dr3(l2)
         x = self.conv7(x)
@@ -101,21 +153,25 @@ class classifier32(nn.Module):
         x = self.bn9(x)
         l3 = nn.LeakyReLU(0.2)(x)
         
-        
         l3 = self.avgpool(l3)
         l3 = l3.view(batch_size, -1)
         
         if 2 in return_features:
             out_feat.append(l3)
         
+        if 2 in noise:
+            l3, ny = self.noiseLayer(l3, y)
+        
         y = self.fc1(l3)
         
         if len(return_features) > 0:
             if len(return_features) == 1:
                 out_feat = out_feat[0]
-            return y, out_feat
 
-        return y, []
+        if len(noise) > 0:
+            return y, out_feat, ny
+        
+        return y, out_feat
 
 
 class NoiseInjection(LightningModule):
@@ -128,6 +184,7 @@ class NoiseInjection(LightningModule):
                  batch_size: int = 128,
                  num_workers: int = 48,
                  class_split: int = 0,
+                 latent_size: int = 128,
                  **kwargs):
         
         super().__init__()
@@ -141,9 +198,11 @@ class NoiseInjection(LightningModule):
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.class_split = class_split
+        self.latent_size = latent_size
         self.splits = get_splits(dataset, class_split)
         
         self.model = classifier32(num_classes=len(self.splits['known_classes']))
+        self.dummyFC = nn.Linear(self.latent_size, len(self.splits['known_classes']))
         self.criterion = nn.CrossEntropyLoss()
         self.auroc = AUROC(pos_label=1)
     
@@ -153,28 +212,42 @@ class NoiseInjection(LightningModule):
         
     def training_step(self, batch, batch_idx):
         x, y = batch
-        logit, features = self(x, return_features=[])
+        logit, features = self.model(x, y, return_features=[2,])
+        dummy_origin = self.dummyFC(features)
         
-        loss = self.criterion(logit, y)
+        
+        closs = self.criterion(torch.cat([logit, dummy_origin], dim=0), torch.cat([y, y], dim=0))
+        
+        logit2, emb, ny = self.model(x, y, noise=[1,], return_features=[2,])
+        
+        noise_logit = self.dummyFC(emb)
+        
+        mask = (y == ny).type_as(y)
+        c2loss = self.criterion(logit2, y)
+        noise_loss = self.criterion(noise_logit, y)
         
         top1k = accuracy(logit, y, topk=(1,))[0]
 
-        log_dict = {'train_loss': loss, 'train_acc': top1k}
+        log_dict = {'train_classL': closs, 'train_acc': top1k,
+                    'train_noiseL': c2loss, 'noiseLoss': noise_loss}
         
-        self.log_dict(log_dict, on_step=True, prog_bar=True)
+        self.log_dict(log_dict, on_step=True)
         
-        return loss
+        return closs + c2loss * 0.3 + noise_loss
+        # return closs
     
     def validation_step(self, batch, batch_idx):
         x, train_y, y, known_idxs = batch
        
-        logit, features = self(x, return_features=[])
+        logit, features = self.model(x, y, return_features=[2,])
+        dummy_out = self.dummyFC(features)
         
+        total_logit = torch.cat([logit, dummy_out], dim=0)
         loss = self.criterion(logit[known_idxs], train_y[known_idxs])
         
         soft_max_logit = torch.softmax(logit, dim=-1)
-        soft_max_auroc = self.auroc(soft_max_logit.max(1)[0], known_idxs.long())
-        logit_auroc = self.auroc(logit.max(1)[0], known_idxs.long())
+        soft_max_auroc = self.auroc(soft_max_logit.max(-1)[0], known_idxs.long())
+        logit_auroc = self.auroc(logit.max(-1)[0], known_idxs.long())
         
         top1k = accuracy(logit[known_idxs], train_y[known_idxs], topk=(1,))[0]
         

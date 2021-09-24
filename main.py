@@ -4,7 +4,6 @@ import torch
 
 # base python module
 import argparse
-import wandb
 import pytorch_lightning as pl
 from pytorch_lightning import Trainer, seed_everything
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
@@ -33,7 +32,7 @@ def main():
     args = parser.parse_args()
     args.log_dir = None
     
-    base_log_dir = f"./log/{args.model}"
+    base_log_dir = f"./log/{args.model}/{args.dataset}_s{args.class_split}/"
     os.makedirs(base_log_dir, exist_ok=True)
     
     # this makes 2 directories if i use multiple gpus
@@ -51,11 +50,10 @@ def main():
     
     wandb_logger = WandbLogger(
         project=f"{args.model}",
-        name=f"{os.environ['servername']}-{os.environ['dockername']}-v{v_num}-{args.dataset}" + \
-              "-split{args.class_split}",
-        log_model="all",
+        name=f"{os.environ['servername']}-{os.environ['dockername']}-{args.dataset}" + \
+             f"-s{args.class_split}-v{v_num}",
+        log_model=False,
         save_dir=args.log_dir,
-        log_model=False
     )
     
     checkpoint_callback = ModelCheckpoint(
