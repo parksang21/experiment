@@ -1,9 +1,12 @@
+from logging import makeLogRecord
 from pytorch_lightning import LightningModule
 from argparse import ArgumentParser
+from pytorch_lightning.trainer import optimizers
 
 import torch
 from torch import nn
 from torch.utils.data.dataloader import DataLoader
+from torchvision.datasets.cifar import CIFAR10
 from torchmetrics import AUROC
 
 from data.cifar10 import SplitCifar10, train_transform, val_transform, OpenTestCifar10
@@ -218,7 +221,7 @@ class NoiseInjection(LightningModule):
         
         closs = self.criterion(torch.cat([logit, dummy_origin], dim=1), y)
         
-        logit2, emb, ny = self.model(x, y, noise=[0, 1, ], return_features=[2,])
+        logit2, emb, ny = self.model(x, y, noise=[0, 1, 2], return_features=[2,])
         
         noise_logit = self.dummyFC(emb)
         
@@ -277,7 +280,7 @@ class NoiseInjection(LightningModule):
         # optimizer = torch.optim.SGD(params, lr=self.lr, momentum=self.momentum, 
         #                              weight_decay=self.weight_decay)
         optimizer = torch.optim.Adam(params, lr=self.lr, weight_decay=self.weight_decay)
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=20)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=10)
         
         return {
             'optimizer': optimizer,
@@ -292,7 +295,7 @@ class NoiseInjection(LightningModule):
         
         if self.dataset == 'cifar10':
             dataset = SplitCifar10(self.data_dir, train=True,
-                                   transform=train_transform)
+                                   transform=train_transform, download=True)
             dataset.set_split(self.splits['known_classes'])
         
         return DataLoader(dataset, batch_size=self.batch_size, num_workers=self.num_workers)
@@ -300,7 +303,8 @@ class NoiseInjection(LightningModule):
     def val_dataloader(self):
         if self.dataset == 'cifar10':
             dataset = OpenTestCifar10(self.data_dir, train=False,
-                                      transform=val_transform, split=self.splits['known_classes'])
+                                      transform=val_transform, split=self.splits['known_classes'],
+                                      download=True)
             
         return DataLoader(dataset, batch_size=self.batch_size, num_workers=self.num_workers)
     

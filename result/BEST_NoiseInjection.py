@@ -1,3 +1,7 @@
+'''
+s2-0-cifar10-s0-v3
+'''
+
 from pytorch_lightning import LightningModule
 from argparse import ArgumentParser
 
@@ -218,7 +222,7 @@ class NoiseInjection(LightningModule):
         
         closs = self.criterion(torch.cat([logit, dummy_origin], dim=1), y)
         
-        logit2, emb, ny = self.model(x, y, noise=[0, 1, ], return_features=[2,])
+        logit2, emb, ny = self.model(x, y, noise=[0, 1, 2], return_features=[2,])
         
         noise_logit = self.dummyFC(emb)
         

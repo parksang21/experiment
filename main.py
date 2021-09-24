@@ -19,20 +19,27 @@ MODEL_CHOICES = list(model_dict.keys())
 
 def main():
     
-    seed_everything()
     
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", default="cifar10", type=str, 
                         choices=["cifar10", "stl10", "imagenet"])
     parser.add_argument("--model", choices=MODEL_CHOICES)
+    parser.add_argument("--seed", type=int, default=0)
+    
+    
     script_args, _ = parser.parse_known_args()
+    if not script_args.seed == 0:
+        seed_everything(script_args.seed)
+    else:
+        seed_everything()
+        
     Model = model_dict[script_args.model]
     parser = Model.add_model_specific_args(parser)
     parser = Trainer.add_argparse_args(parser)
     args = parser.parse_args()
     args.log_dir = None
     
-    base_log_dir = f"./log/{args.model}/{args.dataset}_s{args.class_split}/"
+    base_log_dir = f"./log/{args.model}/{args.dataset}_s{args.class_split}"
     os.makedirs(base_log_dir, exist_ok=True)
     
     # this makes 2 directories if i use multiple gpus
@@ -68,6 +75,8 @@ def main():
                                          callbacks=[checkpoint_callback, lr_monitor])
     # wandb_logger.watch(model)
     wandb_logger.log_hyperparams(args)
+    trainer.tune(model)
+    
     trainer.fit(model)
     
     return model
