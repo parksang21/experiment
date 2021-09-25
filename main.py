@@ -35,7 +35,7 @@ def main():
         
     Model = model_dict[script_args.model]
     parser = Model.add_model_specific_args(parser)
-    parser = Trainer.add_argparse_args(parser)
+    # parser = Trainer.add_argparse_args(parser)
     args = parser.parse_args()
     args.log_dir = None
     
@@ -71,8 +71,14 @@ def main():
     
     model = Model(**vars(args))
     # trainer = Trainer.from_argparse_args(args)
-    trainer = Trainer.from_argparse_args(args, logger=wandb_logger, 
-                                         callbacks=[checkpoint_callback, lr_monitor])
+    # trainer = Trainer.from_argparse_args(args, logger=wandb_logger, 
+    #                                      callbacks=[checkpoint_callback, lr_monitor])
+
+    trainer = Trainer(gpus=1, accelerator="ddp", logger=wandb_logger,
+                      callbacks=[checkpoint_callback, lr_monitor],
+                      max_epochs=100,
+                      precision=16)
+    
     # wandb_logger.watch(model)
     wandb_logger.log_hyperparams(args)
     trainer.tune(model)
