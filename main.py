@@ -74,7 +74,7 @@ def main():
     # trainer = Trainer.from_argparse_args(args, logger=wandb_logger, 
     #                                      callbacks=[checkpoint_callback, lr_monitor])
 
-    trainer = Trainer(gpus=1, accelerator="ddp", logger=wandb_logger,
+    trainer = Trainer(gpus=1, accelerator="dp", logger=wandb_logger,
                       callbacks=[checkpoint_callback, lr_monitor],
                       max_epochs=100,
                       precision=16)

@@ -7,6 +7,7 @@ import torch.nn as nn
 
 from pytorch_lightning import LightningModule
 from argparse import ArgumentParser
+import wandb
 
 import torch
 from torch import nn
@@ -219,6 +220,9 @@ class NoiseInj_resnet(LightningModule):
         self.criterion = nn.CrossEntropyLoss()
         self.auroc = AUROC(pos_label=1)
         self.mrl = nn.MarginRankingLoss(margin=5.0)
+        
+    def on_train_start(self):
+        wandb.save(__file__)
     
     def forward(self, x, y, noise=[]):
         logit, features = self.model(x, y, noise)
@@ -232,7 +236,7 @@ class NoiseInj_resnet(LightningModule):
         
         closs = self.criterion(torch.cat([logit, dummy_origin], dim=1), y)
         
-        uo = self.model(x, y, noise=[1,])
+        uo = self.model(x, y, noise=[2,])
         
         logit2 = self.fc(uo['x_f'])
         noise_logit = self.dummyFC(uo['x_f'])
@@ -240,7 +244,7 @@ class NoiseInj_resnet(LightningModule):
         max_noise_logit = torch.max(noise_logit, dim=1)[0]
         max_fc_logit = torch.max(logit2, dim=1)[0]
         
-        # mrl_loss = self.mrl(max_noise_logit, max_fc_logit, torch.ones_like(max_noise_logit))
+        mrl_loss = self.mrl(max_noise_logit, max_fc_logit, torch.ones_like(max_noise_logit))
         
         # c2loss = self.criterion(logit2, y)
         # noise_loss = self.criterion(noise_logit, y)
@@ -248,14 +252,15 @@ class NoiseInj_resnet(LightningModule):
         
         top1k = accuracy(logit, y, topk=(1,))[0]
         
-        # loss = closs + mrl_loss * 0.01 + noise_loss
-        loss = closs + noise_loss
+        loss = closs + mrl_loss + noise_loss
+        # loss = closs + noise_loss
 
         log_dict = {
             'classification loss': closs,
             'train acc': top1k,
             'noiseLoss': noise_loss,
-            'total loss': loss
+            'total loss': loss,
+            'ranking loss': mrl_loss
         }
         
         self.log_dict(log_dict, on_step=True)
