@@ -1,5 +1,13 @@
 '''
 s2-0-cifar10-s0-v3
+/workspace/experiment/main.py --model NoiseInjection 
+                            --lr 0.1 
+                            --gpus 0, 
+                            --accelerator ddp 
+                            --max_epoch 100 
+                            --class_split 0 
+                            --alpha 0.5 
+                            --lr 0.001
 '''
 
 from pytorch_lightning import LightningModule
