@@ -160,6 +160,7 @@ class NoiseLayer(nn.Module):
         idxs = y.unsqueeze(0) == self.num_classes.unsqueeze(1)
         mean = []
         std = []
+        #TODO: how to reduce iteration?
         for i in range(self.num_classes.shape[0]):
             x_ = x[idxs[i]]
             mean.append(x_.mean(0))
@@ -168,19 +169,23 @@ class NoiseLayer(nn.Module):
         return torch.stack(mean), torch.stack(std)
     
     def forward(self, x, y):
+        #TODO: sampling different noise for each input not per classes
         batch_size = x.size(0)
         class_mean, class_var = self.calculate_class_mean(x, y)
+        
+        new_index = torch.randperm(batch_size).type_as(y)
         
         class_noise = torch.normal(mean=class_mean, std=class_var).type_as(x).detach()
         # class_noise = torch.normal(mean=0., std=class_var).type_as(x).detach()
 
-        index = torch.randperm(batch_size).type_as(y)
-        newY = y[index]
+        newY = y[new_index]
         mask = y != newY
-        if x.dim() == 2:
-            mask = mask.unsqueeze(1).expand_as(x).type_as(x)
-        else:
-            mask = mask[...,None,None,None].expand_as(x).type_as(x)
+        
+        
+        # if x.dim() == 2:
+        #     mask = mask.unsqueeze(1).expand_as(x).type_as(x)
+        # else:
+        #     mask = mask[...,None,None,None].expand_as(x).type_as(x)
         
         return ((1 - self.alpha) * x + self.alpha * class_noise[newY]), newY
     
@@ -197,6 +202,7 @@ class NoiseInj_resnet(LightningModule):
                  class_split: int = 0,
                  latent_size: int = 128,
                  alpha: float = 0.5,
+                 noise_layer: int = 3,
                  **kwargs):
         
         super().__init__()
@@ -211,6 +217,7 @@ class NoiseInj_resnet(LightningModule):
         self.num_workers = num_workers
         self.class_split = class_split
         self.latent_size = latent_size
+        self.noise_layer = noise_layer
         self.alpha = alpha
         self.splits = get_splits(dataset, class_split)
         
@@ -230,21 +237,21 @@ class NoiseInj_resnet(LightningModule):
         
     def training_step(self, batch, batch_idx):
         x, y = batch
-        out = self.model(x, y, noise=[0,1,2,3])
+        out = self.model(x, y)
         logit = self.fc(out['x_f'])
         dummy_origin = self.dummyFC(out['x_f'])
         
         closs = self.criterion(torch.cat([logit, dummy_origin], dim=1), y)
         
-        uo = self.model(x, y, noise=[2,])
+        uo = self.model(x, y, noise=[self.noise_layer])
         
         logit2 = self.fc(uo['x_f'])
         noise_logit = self.dummyFC(uo['x_f'])
         
-        max_noise_logit = torch.max(noise_logit, dim=1)[0]
-        max_fc_logit = torch.max(logit2, dim=1)[0]
+        # max_noise_logit = torch.max(noise_logit, dim=1)[0]
+        # max_fc_logit = torch.max(logit2, dim=1)[0]
         
-        mrl_loss = self.mrl(max_noise_logit, max_fc_logit, torch.ones_like(max_noise_logit))
+        # mrl_loss = self.mrl(max_noise_logit, max_fc_logit, torch.ones_like(max_noise_logit))
         
         # c2loss = self.criterion(logit2, y)
         # noise_loss = self.criterion(noise_logit, y)
@@ -252,15 +259,15 @@ class NoiseInj_resnet(LightningModule):
         
         top1k = accuracy(logit, y, topk=(1,))[0]
         
-        loss = closs + mrl_loss + noise_loss
-        # loss = closs + noise_loss
+        # loss = closs + mrl_loss + noise_loss
+        loss = closs + noise_loss
 
         log_dict = {
             'classification loss': closs,
             'train acc': top1k,
             'noiseLoss': noise_loss,
             'total loss': loss,
-            'ranking loss': mrl_loss
+            # 'ranking loss': mrl_loss
         }
         
         self.log_dict(log_dict, on_step=True)
@@ -304,13 +311,13 @@ class NoiseInj_resnet(LightningModule):
         # optimizer = torch.optim.SGD(params, lr=self.lr, momentum=self.momentum, 
         #                              weight_decay=self.weight_decay)
         optimizer = torch.optim.Adam(params, lr=self.lr, weight_decay=self.weight_decay)
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=20)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=10)
         
         return {
             'optimizer': optimizer,
             'lr_scheduler': {
                 'scheduler': scheduler,
-                'monitor': 'val_loss'
+                'monitor': 'val_acc'
             }
         }
         # return optimizer
@@ -346,5 +353,6 @@ class NoiseInj_resnet(LightningModule):
         parser.add_argument("--class_split", type=int, default=0)
         
         parser.add_argument("--alpha", type=float, default=1.0)
+        parser.add_argument("--noise_layer", type=int, default=3)
 
         return parser
