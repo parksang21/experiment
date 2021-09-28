@@ -14,9 +14,9 @@ from data.cifar10 import SplitCifar10, train_transform, val_transform, OpenTestC
 from data.capsule_split import get_splits
 from utils import accuracy
 
-class NoiseLayer(nn.Module):
+class CutmixLayer(nn.Module):
     def __init__(self, alpha, num_classes):
-        super(NoiseLayer, self).__init__()
+        super(CutmixLayer, self).__init__()
         self.alpha = alpha
         self.classes = torch.arange(num_classes)
         self.num_classes = num_classes
@@ -107,7 +107,7 @@ class classifier32(nn.Module):
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
 
         self.apply(weights_init)
-        self.noiseLayer = NoiseLayer(alpha, num_classes)
+        self.noiseLayer = CutmixLayer(alpha, num_classes)
 
     def forward(self, x, y, return_features=[], noise=[]):
         batch_size = len(x)

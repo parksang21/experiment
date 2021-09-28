@@ -242,10 +242,14 @@ class NoiseInj_resnet(LightningModule):
         logit = self.fc(out['x_f'])
         dummy_origin = self.dummyFC(out['x_f'])
         
-        closs = self.criterion(torch.cat([logit, dummy_origin], dim=1), y)
+        closs = self.criterion(logit, y) + self.criterion(dummy_origin, y)
+        origin_logit_max = torch.max(dummy_origin, dim=1)[0]
+        origin_dummy_max = torch.max(dummy_origin, dim=1)[0]
+        
+        origin_mrl = self.mrl(origin_logit_max, origin_dummy_max, torch.ones_like(origin_logit_max))
         
         # random sampling from noise
-        noise_layer = random.randint(0, 4)
+        noise_layer = random.randint(0, 3)
         uo = self.model(x, y, noise=[noise_layer])
         
         logit2 = self.fc(uo['x_f'])
@@ -256,11 +260,11 @@ class NoiseInj_resnet(LightningModule):
         
         mrl_loss = self.mrl(max_noise_logit, max_fc_logit, torch.ones_like(max_noise_logit))
         
-        noise_loss = self.criterion(torch.cat([noise_logit, logit2], dim=1), y)
+        noise_loss = self.criterion(noise_logit, y) * 0.5 + self.criterion(noise_logit, uo['ny']) * 0.5
         
         top1k = accuracy(logit, y, topk=(1,))[0]
         
-        loss = closs + mrl_loss * 0.01 + noise_loss
+        loss = closs + mrl_loss * 0.01 + noise_loss + origin_mrl * 0.01
         # loss = closs + noise_loss
 
         log_dict = {
@@ -268,7 +272,8 @@ class NoiseInj_resnet(LightningModule):
             'train acc': top1k,
             'noiseLoss': noise_loss,
             'total loss': loss,
-            'ranking loss': mrl_loss
+            'ranking loss': mrl_loss,
+            'oranking loss': origin_mrl,
         }
         
         self.log_dict(log_dict, on_step=True)

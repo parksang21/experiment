@@ -1,8 +1,17 @@
+'''
+s2-0-cifar10-s0-v3
+/workspace/experiment/main.py --model NoiseInjection 
+                            --lr 0.1 
+                            --gpus 0, 
+                            --accelerator ddp 
+                            --max_epoch 100 
+                            --class_split 0 
+                            --alpha 0.5 
+                            --lr 0.001
+'''
+
 from pytorch_lightning import LightningModule
 from argparse import ArgumentParser
-import wandb
-import random
-import numpy as np
 
 import torch
 from torch import nn
@@ -17,8 +26,7 @@ class NoiseLayer(nn.Module):
     def __init__(self, alpha, num_classes):
         super(NoiseLayer, self).__init__()
         self.alpha = alpha
-        self.classes = torch.arange(num_classes)
-        self.num_classes = num_classes
+        self.num_classes = torch.arange(num_classes)
         
     def calculate_class_mean(self, 
                            x: torch.Tensor, 
@@ -32,12 +40,11 @@ class NoiseLayer(nn.Module):
         Returns:
             [Tensor]: [returns class dependent noise variance]
         """
-        self.classes = self.classes.type_as(y)
-        idxs = y.unsqueeze(0) == self.classes.unsqueeze(1)
+        self.num_classes = self.num_classes.type_as(y)
+        idxs = y.unsqueeze(0) == self.num_classes.unsqueeze(1)
         mean = []
         std = []
-        #TODO: how to reduce iteration?
-        for i in range(self.classes.shape[0]):
+        for i in range(self.num_classes.shape[0]):
             x_ = x[idxs[i]]
             mean.append(x_.mean(0))
             std.append(x_.std(0))
@@ -54,16 +61,16 @@ class NoiseLayer(nn.Module):
         newY = y[new_index]
         mask = (newY == y)
         while mask.any().item():
-            newY[mask] = torch.randint(0, self.num_classes, (torch.sum(mask),)).type_as(y)
+            newY[mask] = torch.randint(0, 6, (torch.sum(mask),)).type_as(y)
             mask = (newY == y)
             
-        lamb = np.random.beta(self.alpha, self.alpha)
+        # lamb = torch.distributions.bytearray([source[, encodi
         
         # generating noise
-        class_noise = torch.normal(mean=class_mean[newY], std=class_var[newY]).type_as(x).detach()
+        class_noise = torch.normal(mean=0, std=class_var[newY]).type_as(x).detach()
         # class_noise = torch.normal(mean=0., std=class_var).type_as(x).detach()
 
-        return ((1 - lamb) * x + lamb * class_noise), newY, lamb
+        return ((1 - self.alpha) * x + self.alpha * class_noise), newY
 
 def weights_init(m):
     classname = m.__class__.__name__
@@ -129,7 +136,7 @@ class classifier32(nn.Module):
             out_feat.append(l1)
             
         if 0 in noise:
-            l1, ny, lamb = self.noiseLayer(l1, y)
+            l1, ny = self.noiseLayer(l1, y)
 
         x = self.dr2(l1)
         x = self.conv4(x)
@@ -146,7 +153,7 @@ class classifier32(nn.Module):
             out_feat.append(l2)
             
         if 1 in noise:
-            l2, ny, lamb = self.noiseLayer(l2, y)
+            l2, ny = self.noiseLayer(l2, y)
 
         x = self.dr3(l2)
         x = self.conv7(x)
@@ -166,7 +173,7 @@ class classifier32(nn.Module):
             out_feat.append(l3)
         
         if 2 in noise:
-            l3, ny, lamb = self.noiseLayer(l3, y)
+            l3, ny = self.noiseLayer(l3, y)
         
         y = self.fc1(l3)
         
@@ -175,7 +182,7 @@ class classifier32(nn.Module):
                 out_feat = out_feat[0]
 
         if len(noise) > 0:
-            return y, out_feat, ny, lamb
+            return y, out_feat, ny
         
         return y, out_feat
 
@@ -214,9 +221,6 @@ class NoiseInjection(LightningModule):
         self.criterion = nn.CrossEntropyLoss()
         self.auroc = AUROC(pos_label=1)
         self.mrl = nn.MarginRankingLoss(margin=10)
-        
-    def on_train_start(self):
-        wandb.save(__file__)
     
     def forward(self, x, return_features=[]):
         logit, features = self.model(x, return_features)
@@ -225,39 +229,30 @@ class NoiseInjection(LightningModule):
     def training_step(self, batch, batch_idx):
         x, y = batch
         logit, features = self.model(x, y, return_features=[2,])
-        # dummy_origin = self.dummyFC(features)
+        dummy_origin = self.dummyFC(features)
         
         
-        # closs = self.criterion(torch.cat([logit, dummy_origin], dim=1), y)
-        closs = self.criterion(logit, y)
+        closs = self.criterion(torch.cat([logit, dummy_origin], dim=1), y)
         
-        noise_layer = random.randint(0, 2)
-        logit2, emb, ny, lamb = self.model(x, y, noise=[noise_layer], return_features=[2,])
+        logit2, emb, ny = self.model(x, y, noise=[0, 1, 2], return_features=[2,])
         
-        # noise_logit = self.dummyFC(emb)
-        mloss = self.criterion(logit2, y) * (1-lamb) + self.criterion(logit2, ny) * lamb
-        # max_noise_logit = torch.max(noise_logit, dim=1)[0]
-        # max_fc_logit = torch.max(logit2, dim=1)[0]
+        noise_logit = self.dummyFC(emb)
         
-        # mrl_loss = self.mrl(max_noise_logit, max_fc_logit, torch.ones_like(max_noise_logit))
+        max_noise_logit = torch.max(noise_logit, dim=1)[0]
+        max_fc_logit = torch.max(logit2, dim=1)[0]
+        
+        mrl_loss = self.mrl(max_noise_logit, max_fc_logit, torch.ones_like(max_noise_logit))
         
         # c2loss = self.criterion(logit2, y)
-        # noise_loss = self.criterion(noise_logit, y)
+        noise_loss = self.criterion(noise_logit, y)
         
         top1k = accuracy(logit, y, topk=(1,))[0]
         
-        # loss = closs + mrl_loss * 0.01 + noise_loss
-        loss  = (closs + mloss) / 2
+        loss = closs + mrl_loss * 0.01 + noise_loss
 
-        log_dict = {
-            # 'classification loss': closs, 
-            'train acc': top1k,
-            # 'ranking loss': mrl_loss, 
-            # 'noiseLoss': noise_loss,
-            'c loss': closs,
-            'm loss': mloss,
-            'total loss': loss
-            }
+        log_dict = {'classification loss': closs, 'train acc': top1k,
+                    'ranking loss': mrl_loss, 'noiseLoss': noise_loss,
+                    'total loss': loss}
         
         self.log_dict(log_dict, on_step=True)
         
@@ -298,16 +293,13 @@ class NoiseInjection(LightningModule):
         # optimizer = torch.optim.SGD(params, lr=self.lr, momentum=self.momentum, 
         #                              weight_decay=self.weight_decay)
         optimizer = torch.optim.Adam(params, lr=self.lr, weight_decay=self.weight_decay)
-        # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=20)
-        scheduler = torch.optim.lr_scheduler.MultiStepLR(
-            optimizer, milestones=[30, 60, 90], gamma=0.5
-        )
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=20)
         
         return {
             'optimizer': optimizer,
             'lr_scheduler': {
                 'scheduler': scheduler,
-                # 'monitor': 'val_loss'
+                'monitor': 'val_loss'
             }
         }
         # return optimizer
