@@ -27,12 +27,10 @@ from utils import accuracy
 class NoiseLayer(nn.Module):
     def __init__(self, alpha, num_classes):
         super(NoiseLayer, self).__init__()
-        self.alpha = nn.Parameter(torch.ones(1))
+        self.alpha = alpha
         self.means = None
         self.std = None
         self.num_classes = torch.arange(num_classes)
-        
-        self.alpha.data.normal_(1.0, 0.02)
         
     def calculate_class_mean(self, 
                            x: torch.Tensor, 
@@ -51,30 +49,17 @@ class NoiseLayer(nn.Module):
         mean = []
         std = []
         for i in range(self.num_classes.shape[0]):
-            x_ = x[idxs[i]].detach()
+            x_ = x[idxs[i]]
             mean.append(x_.mean(0))
             std.append(x_.std(0))
         
         self.means = torch.stack(mean)
         self.std = torch.stack(std)
-        
-    def cal_index(self, y):
-        batch_size = y.size(0)
-        
-        #TODO: matching indexes with other classes reduce iteration
-        new_index = torch.randperm(batch_size).type_as(y)
-        newY = y[new_index]
-        mask = (newY == y)
-        while mask.any().item():
-            newY[mask] = torch.randint(0, 6, (torch.sum(mask),)).type_as(y)
-            mask = (newY == y)
-        return newY
     
-    def forward(self, x, y):
+    def forward(self, x, newY):
         #TODO: sampling different noise for each input not per classes
     
         # class_noise = torch.normal(mean=0, std=self.std[newY]).type_as(x).detach()
-        newY = self.cal_index(y)
         class_noise = torch.normal(mean=0, std=self.std[newY]).type_as(x)
 
         return (x + self.alpha * class_noise)
@@ -121,15 +106,31 @@ class classifier32(nn.Module):
         self.dr3 = nn.Dropout2d(0.2)
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
 
+        self.apply(weights_init)
         self.noise0 = NoiseLayer(alpha, num_classes)
         self.noise1 = NoiseLayer(alpha, num_classes)
         self.noise2 = NoiseLayer(alpha, num_classes)
         self.noise3 = NoiseLayer(alpha, num_classes)
         
-        self.apply(weights_init)
+    def cal_index(self, x, y):
+        batch_size = x.size(0)
         
+        #TODO: matching indexes with other classes reduce iteration
+        new_index = torch.randperm(batch_size).type_as(y)
+        newY = y[new_index]
+        mask = (newY == y)
+        while mask.any().item():
+            newY[mask] = torch.randint(0, 6, (torch.sum(mask),)).type_as(y)
+            mask = (newY == y)
+        return newY
+
     def forward(self, x, y,  noise=[]):
         batch_size = len(x)
+        
+        if len(noise) > 0:
+            newY = self.cal_index(x, y)
+        else:
+            newY = None
 
         x = self.dr1(x)
         x = self.conv1(x)
@@ -144,10 +145,9 @@ class classifier32(nn.Module):
         x = self.bn3(x)
         l1 = nn.LeakyReLU(0.2)(x)
         
-        if len(noise) == 0:
-            self.noise0.calculate_class_mean(l1, y)
+        self.noise0.calculate_class_mean(l1, y)
         if 0 in noise:
-            l1 = self.noise0(l1, y)
+            l1 = self.noise0(l1, newY)
 
         x = self.dr2(l1)
         x = self.conv4(x)
@@ -162,10 +162,9 @@ class classifier32(nn.Module):
         x = self.bn6(x)
         l2 = nn.LeakyReLU(0.2)(x)
         
-        if len(noise) == 0:
-            self.noise1.calculate_class_mean(l2, y)
+        self.noise1.calculate_class_mean(l2, y)
         if 1 in noise:
-            l2 = self.noise1(l2, y)
+            l2 = self.noise1(l2, newY)
 
         x = self.dr3(l2)
         x = self.conv7(x)
@@ -180,10 +179,10 @@ class classifier32(nn.Module):
         
         l3 = self.avgpool(l3)
         l3 = l3.view(batch_size, -1)
-        if len(noise) == 0:
-            self.noise2.calculate_class_mean(l3, y)
+        
+        self.noise2.calculate_class_mean(l3, y)
         if 2 in noise:
-            l3 = self.noise2(l3, y)
+            l3 = self.noise2(l3, newY)
         
         y = self.fc1(l3)
         
@@ -192,7 +191,7 @@ class classifier32(nn.Module):
             'l3': l3,
             'l2': l2,
             'l1': l1,
-            # 'newY': newY
+            'newY': newY
         }
 
 
@@ -208,7 +207,6 @@ class NoiseInjection(LightningModule):
                  class_split: int = 0,
                  latent_size: int = 128,
                  alpha: float = 0.5,
-                 log_dir: str = './log',
                  **kwargs):
         
         super().__init__()
@@ -224,18 +222,15 @@ class NoiseInjection(LightningModule):
         self.class_split = class_split
         self.latent_size = latent_size
         self.alpha = alpha
-        self.log_dir = log_dir
-        
         self.splits = get_splits(dataset, class_split)
         
         self.model = classifier32(num_classes=len(self.splits['known_classes']), alpha=self.alpha)
 
         self.criterion = nn.CrossEntropyLoss()
-        self.kld = nn.KLDivLoss()
         self.auroc = AUROC(pos_label=1)
         
     def on_train_start(self) -> None:
-        wandb.save(self.log_dir+f"/{__file__.split('/')[-1]}")
+        wandb.save(__file__)
     
     def forward(self, x, y, noise=[]):
         out = self.model(x, y, noise)
@@ -245,31 +240,26 @@ class NoiseInjection(LightningModule):
         x, y = batch
         
         # forward without noise
-        out = self(x, y, [])
+        out = self(x, y, [0, 1, 2])
         
         closs = self.criterion(out['logit'], y)
 
         # noise out
-        nout = self(x, y, [0, 1, 2])
-        
-        nc_loss = self.criterion(nout['logit']/2, y)
-        
-        ud = torch.zeros_like(nout['logit']).softmax(-1)
-        kld_loss = (ud * (ud / nout['logit'].softmax(-1)).log()).sum(-1).mean()
+        # nout = self(x, y, [0, 1, 2])
+        # noise_loss = self.criterion(nout['logit'], nout['newY']) * 0.3
         
         top1k = accuracy(out['logit'], y, topk=(1,))[0]
         
         # loss = closs + noise_loss
-        loss = closs * 0.9 + kld_loss * 0.1 + nc_loss
+        loss = closs
 
         log_dict = {
             'classification loss': closs,
             'train acc': top1k,
-            'kld': kld_loss,
-            'noiseLoss': nc_loss,
+            # 'ranking loss': mrl_loss,
+            # 'noiseLoss': noise_loss,
             'total loss': loss
         }
-        
         
         self.log_dict(log_dict, on_step=True)
         
@@ -293,14 +283,11 @@ class NoiseInjection(LightningModule):
             'val_loss': loss, 
             'val_acc': top1k,
             'softmax': soft_max_auroc,
-            'logit': logit_auroc,
-            'alpha0': self.model.noise0.alpha.data.item(),
-            'alpha1': self.model.noise1.alpha.data.item(),
-            'alpha2': self.model.noise2.alpha.data.item()
+            'logit': logit_auroc, 
             }
         
         self.log_dict(log_dict)
-
+        
         return loss
     
     def on_validation_end(self) -> None:

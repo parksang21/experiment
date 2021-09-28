@@ -24,7 +24,7 @@ def main():
     parser.add_argument("--dataset", default="cifar10", type=str, 
                         choices=["cifar10", "stl10", "imagenet"])
     parser.add_argument("--model", choices=MODEL_CHOICES)
-    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--seed", type=int, default=187560756)
     
     
     script_args, _ = parser.parse_known_args()
@@ -62,6 +62,8 @@ def main():
         log_model=False,
         save_dir=args.log_dir,
     )
+    args.servername = os.environ['servername']
+    args.dockername = os.environ['dockername']
     
     checkpoint_callback = ModelCheckpoint(
         dirpath=args.log_dir,
@@ -78,7 +80,8 @@ def main():
                       logger=wandb_logger,
                       callbacks=[checkpoint_callback, lr_monitor],
                       max_epochs=100,
-                      precision=16
+                      precision=32,
+                      auto_lr_find=True,
                       )
     
     # wandb_logger.watch(model)
