@@ -229,13 +229,14 @@ class NoiseInjection(LightningModule):
         self.splits = get_splits(dataset, class_split)
         
         self.model = classifier32(num_classes=len(self.splits['known_classes']), alpha=self.alpha)
+        self.dummy_fc = nn.Linear(self.latent_size, len(self.splits['known_classes']))
 
         self.criterion = nn.CrossEntropyLoss()
         self.kld = nn.KLDivLoss()
         self.auroc = AUROC(pos_label=1)
         
     def on_train_start(self) -> None:
-        wandb.save(self.log_dir+f"/{__file__.split('/')[-1]}")
+        wandb.save(self.log_dir+f"/{__file__.split('/')[-1]}", base_dir='/')
     
     def forward(self, x, y, noise=[]):
         out = self.model(x, y, noise)

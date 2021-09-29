@@ -1,21 +1,12 @@
-'''
-s2-0-cifar10-s0-v3
-/workspace/experiment/main.py --model NoiseInjection 
-                            --lr 0.1 
-                            --gpus 0, 
-                            --accelerator ddp 
-                            --max_epoch 100 
-                            --class_split 0 
-                            --alpha 0.5 
-                            --lr 0.001
-'''
-
+from logging import makeLogRecord
 from pytorch_lightning import LightningModule
 from argparse import ArgumentParser
+from pytorch_lightning.trainer import optimizers
 
 import torch
 from torch import nn
 from torch.utils.data.dataloader import DataLoader
+from torchvision.datasets.cifar import CIFAR10
 from torchmetrics import AUROC
 
 from data.cifar10 import SplitCifar10, train_transform, val_transform, OpenTestCifar10

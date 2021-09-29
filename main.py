@@ -24,6 +24,7 @@ def main():
     parser.add_argument("--dataset", default="cifar10", type=str, 
                         choices=["cifar10", "stl10", "imagenet"])
     parser.add_argument("--model", choices=MODEL_CHOICES)
+    parser.add_argument("--project", type=str, default="default")
     parser.add_argument("--seed", type=int, default=187560756)
     
     
@@ -56,7 +57,7 @@ def main():
     shutil.copy(model_file_path, args.log_dir+f"/{args.model}.py")
     
     wandb_logger = WandbLogger(
-        project=f"{args.model}",
+        project=f"{args.project}",
         name=f"{os.environ['servername']}-{os.environ['dockername']}-{args.dataset}" + \
              f"-s{args.class_split}-v{v_num}",
         log_model=False,
@@ -81,7 +82,7 @@ def main():
                       callbacks=[checkpoint_callback, lr_monitor],
                       max_epochs=100,
                       precision=32,
-                      auto_lr_find=True,
+                      auto_lr_find=False,
                       )
     
     # wandb_logger.watch(model)
