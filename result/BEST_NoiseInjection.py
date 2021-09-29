@@ -12,6 +12,7 @@ from torchmetrics import AUROC
 from data.cifar10 import SplitCifar10, train_transform, val_transform, OpenTestCifar10
 from data.capsule_split import get_splits
 from utils import accuracy
+import wandb
 
 class NoiseLayer(nn.Module):
     def __init__(self, alpha, num_classes):
@@ -212,7 +213,10 @@ class NoiseInjection(LightningModule):
     def forward(self, x, return_features=[]):
         logit, features = self.model(x, return_features)
         return logit, features
-        
+    
+    def on_train_start(self) -> None:
+        wandb.save(self.log_dir+f"/{__file__.split('/')[-1]}")
+    
     def training_step(self, batch, batch_idx):
         x, y = batch
         logit, features = self.model(x, y, return_features=[2,])
