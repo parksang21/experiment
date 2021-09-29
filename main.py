@@ -81,7 +81,7 @@ def main():
                       logger=wandb_logger,
                       callbacks=[checkpoint_callback, lr_monitor],
                       max_epochs=100,
-                      precision=32,
+                      precision=16,
                       auto_lr_find=False,
                       )
     

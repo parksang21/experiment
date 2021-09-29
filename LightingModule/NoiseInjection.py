@@ -1,16 +1,3 @@
-'''
-s2-0-cifar10-s0-v3
-/workspace/experiment/main.py --model NoiseInjection 
-                            --lr 0.1 
-                            --gpus 0, 
-                            --accelerator ddp 
-                            --max_epoch 100 
-                            --class_split 0 
-                            --alpha 0.5 
-                            --lr 0.001
-'''
-
-from typing import Optional
 from pytorch_lightning import LightningModule
 from argparse import ArgumentParser
 
@@ -27,12 +14,13 @@ from utils import accuracy
 class NoiseLayer(nn.Module):
     def __init__(self, alpha, num_classes):
         super(NoiseLayer, self).__init__()
-        self.alpha = nn.Parameter(torch.ones(1))
+        # self.alpha = nn.Parameter(torch.ones(1))
+        # self.alpha.data.normal_(1.0, 0.02)
+        self.alpha = alpha
+        
         self.means = None
         self.std = None
         self.num_classes = torch.arange(num_classes)
-        
-        self.alpha.data.normal_(1.0, 0.02)
         
     def calculate_class_mean(self, 
                            x: torch.Tensor, 
@@ -57,6 +45,7 @@ class NoiseLayer(nn.Module):
             #     pass
             # else:
             std.append(x_.std(0))
+            # mean.append(x_.mean(0))
         
         # self.means = torch.stack(mean)
         self.std = torch.stack(std)
@@ -80,7 +69,7 @@ class NoiseLayer(nn.Module):
         newY = self.cal_index(y)
         class_noise = torch.normal(mean=0, std=self.std[newY]).type_as(x)
 
-        return (x + self.alpha * class_noise)
+        return (x + self.alpha * class_noise), newY
 
 def weights_init(m):
     classname = m.__class__.__name__
@@ -133,7 +122,7 @@ class classifier32(nn.Module):
         
     def forward(self, x, y,  noise=[]):
         batch_size = len(x)
-
+        ny = []
         x = self.dr1(x)
         x = self.conv1(x)
         x = self.bn1(x)
@@ -150,7 +139,8 @@ class classifier32(nn.Module):
         if len(noise) == 0:
             self.noise0.calculate_class_mean(l1, y)
         if 0 in noise:
-            l1 = self.noise0(l1, y)
+            l1, ny0 = self.noise0(l1, y)
+            ny.append(ny0)
 
         x = self.dr2(l1)
         x = self.conv4(x)
@@ -168,7 +158,8 @@ class classifier32(nn.Module):
         if len(noise) == 0:
             self.noise1.calculate_class_mean(l2, y)
         if 1 in noise:
-            l2 = self.noise1(l2, y)
+            l2, ny1 = self.noise1(l2, y)
+            ny.append(ny1)
 
         x = self.dr3(l2)
         x = self.conv7(x)
@@ -186,7 +177,8 @@ class classifier32(nn.Module):
         if len(noise) == 0:
             self.noise2.calculate_class_mean(l3, y)
         if 2 in noise:
-            l3 = self.noise2(l3, y)
+            l3, ny2 = self.noise2(l3, y)
+            ny.append(ny2)
         
         y = self.fc1(l3)
         
@@ -195,7 +187,7 @@ class classifier32(nn.Module):
             'l3': l3,
             'l2': l2,
             'l1': l1,
-            # 'newY': newY
+            'ny': ny
         }
 
 
@@ -250,23 +242,34 @@ class NoiseInjection(LightningModule):
         
         # forward without noise
         out = self(x, y, [])
-        
         closs = self.criterion(out['logit'], y)
+        
+        nout = self(x, y, [0, 1, 2])
+        
+        nys = nout['ny']
+        new_dist = torch.zeros_like(nout['logit'])
+        for ny in nys:
+            idx = ny.unsqueeze(1) == torch.arange(6).type_as(y).unsqueeze(0)
+            new_dist[idx] += 1
+        idx = y.unsqueeze(1) == torch.arange(6).type_as(y).unsqueeze(0)
+        new_dist[idx] += 3
+        new_dist = new_dist.softmax(-1)
 
         # noise out
-        nout = self(x, y, [0, 1, 2])
+        # nout = self(x, y, [0, 1])
         
         # nc_loss = self.criterion(nout['logit']/2, y)
         
-        ud = torch.zeros_like(nout['logit']).softmax(-1)
-        kld_loss = (ud * (ud / nout['logit'].softmax(-1)).log()).sum(-1).mean()
+        # ud = torch.zeros_like(nout['logit']).softmax(-1)
+        kld_loss = (new_dist * (new_dist / nout['logit'].softmax(-1)).log()).sum(-1).mean()
+        
         
         top1k = accuracy(out['logit'], y, topk=(1,))[0]
         
-        # loss = closs + noise_loss
+        loss = closs + kld_loss
         # loss = closs * 0.5 + kld_loss * 0.5 + nc_loss
-        loss = closs * 0.5 + kld_loss * 0.5 
-
+        # loss = kld_loss
+        
         log_dict = {
             'classification loss': closs,
             'train acc': top1k,
@@ -299,9 +302,9 @@ class NoiseInjection(LightningModule):
             'val_acc': top1k,
             'softmax': soft_max_auroc,
             'logit': logit_auroc,
-            'alpha0': self.model.noise0.alpha.data.item(),
-            'alpha1': self.model.noise1.alpha.data.item(),
-            'alpha2': self.model.noise2.alpha.data.item()
+            # 'alpha0': self.model.noise0.alpha.data.item(),
+            # 'alpha1': self.model.noise1.alpha.data.item(),
+            # 'alpha2': self.model.noise2.alpha.data.item(),
             }
         
         self.log_dict(log_dict)
@@ -325,15 +328,15 @@ class NoiseInjection(LightningModule):
         #     patience=20
         #     )
         
-        # # COSINE ANNEALING
-        # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100, eta_min=1e-6)
+        # COSINE ANNEALING
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100, eta_min=1e-6)
 
-        # MULTI SETP LR
-        scheduler = torch.optim.lr_scheduler.MultiStepLR(
-            optimizer,
-            milestones=[50],
-            gamma=0.5
-        )
+        # # MULTI SETP LR
+        # scheduler = torch.optim.lr_scheduler.MultiStepLR(
+        #     optimizer,
+        #     milestones=[50],
+        #     gamma=0.5
+        # )
         
         return {
             'optimizer': optimizer,
