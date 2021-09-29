@@ -52,10 +52,13 @@ class NoiseLayer(nn.Module):
         std = []
         for i in range(self.num_classes.shape[0]):
             x_ = x[idxs[i]].detach()
-            mean.append(x_.mean(0))
+            # mean.append(x_.mean(0))
+            # if len(x_.shape) == 4:
+            #     pass
+            # else:
             std.append(x_.std(0))
         
-        self.means = torch.stack(mean)
+        # self.means = torch.stack(mean)
         self.std = torch.stack(std)
         
     def cal_index(self, y):
@@ -236,7 +239,7 @@ class NoiseInjection(LightningModule):
         self.auroc = AUROC(pos_label=1)
         
     def on_train_start(self) -> None:
-        wandb.save(self.log_dir+f"/{__file__.split('/')[-1]}", base_dir='/')
+        wandb.save(self.log_dir+f"/{__file__.split('/')[-1]}")
     
     def forward(self, x, y, noise=[]):
         out = self.model(x, y, noise)
@@ -253,7 +256,7 @@ class NoiseInjection(LightningModule):
         # noise out
         nout = self(x, y, [0, 1, 2])
         
-        nc_loss = self.criterion(nout['logit']/2, y)
+        # nc_loss = self.criterion(nout['logit']/2, y)
         
         ud = torch.zeros_like(nout['logit']).softmax(-1)
         kld_loss = (ud * (ud / nout['logit'].softmax(-1)).log()).sum(-1).mean()
@@ -261,13 +264,14 @@ class NoiseInjection(LightningModule):
         top1k = accuracy(out['logit'], y, topk=(1,))[0]
         
         # loss = closs + noise_loss
-        loss = closs * 0.9 + kld_loss * 0.1 + nc_loss
+        # loss = closs * 0.5 + kld_loss * 0.5 + nc_loss
+        loss = closs * 0.5 + kld_loss * 0.5 
 
         log_dict = {
             'classification loss': closs,
             'train acc': top1k,
             'kld': kld_loss,
-            'noiseLoss': nc_loss,
+            # 'noiseLoss': nc_loss,
             'total loss': loss
         }
         
