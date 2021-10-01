@@ -233,6 +233,7 @@ class NoiseDist(LightningModule):
         self.model = classifier32(num_classes=len(self.splits['known_classes']), alpha=self.alpha)
         self.centers = nn.Embedding(len(self.splits['known_classes']), self.latent_size)
         self.triplet = nn.TripletMarginLoss(margin=5, p=2)
+        self.softmin = nn.Softmin(dim=1)
 
         self.criterion = nn.CrossEntropyLoss()
         self.kld = nn.KLDivLoss()
@@ -240,6 +241,8 @@ class NoiseDist(LightningModule):
         
     def on_train_start(self) -> None:
         wandb.save(self.log_dir+f"/{__file__.split('/')[-1]}")
+    
+    
     
     def forward(self, x, y, noise=[]):
         out = self.model(x, y, noise)
@@ -250,14 +253,19 @@ class NoiseDist(LightningModule):
         
         # forward without noise
         out = self(x, y, [])
-        closs = self.criterion(out['logit'], y)
+        
+        class_center = self.centers(torch.arange(len(self.splits['known_classes'])).type_as(y))
+        center_dist = (class_center - out['l3'].unsqueeze(1)).pow(2).sum(-1).sqrt()
+        logit = self.softmin(center_dist)
+        closs = self.criterion(logit, y)
+        
         center_loss = (out['l3'] - self.centers(y)).pow(2).sum(-1).sqrt().mean()
         
-        nout = self(x, y, [0, 1,])
+        nout = self(x, y, [1,])
         
         triplet_loss = self.triplet(self.centers(y), out['l3'], nout['l3'])
         
-        top1k = accuracy(out['logit'], y, topk=(1,))[0]
+        top1k = accuracy(logit, y, topk=(1,))[0]
         
         loss = closs + center_loss + triplet_loss
         
@@ -280,24 +288,28 @@ class NoiseDist(LightningModule):
        
         out = self(x, train_y, [])
         
-        loss = self.criterion(out['logit'][known_idxs], train_y[known_idxs])
+        # loss = self.criterion(out['logit'][known_idxs], train_y[known_idxs])
+        loss = (out['l3'][known_idxs] - self.centers(train_y[known_idxs])).pow(2).sum(-1).sqrt().mean()
         
-        soft_max_logit = torch.softmax(out['logit'], dim=-1)
-        soft_max_auroc = self.auroc(soft_max_logit.max(-1)[0], known_idxs.long())
-        logit_auroc = self.auroc(out['logit'].max(-1)[0], known_idxs.long())
+        # soft_max_logit = torch.softmax(out['logit'], dim=-1)
+        # soft_max_auroc = self.auroc(soft_max_logit.max(-1)[0], known_idxs.long())
+        # logit_auroc = self.auroc(out['logit'].max(-1)[0], known_idxs.long())
         
         class_center = self.centers(torch.arange(len(self.splits['known_classes'])).type_as(y))
         center_dist = (class_center - out['l3'].unsqueeze(1)).pow(2).sum(-1).sqrt()
+        
+        logit = self.softmin(center_dist)
 
         dist_auroc = self.auroc(center_dist.min(-1)[0], (~known_idxs).long())
+        softmin_auroc = self.auroc(logit.max(-1)[0], (known_idxs).long())
         
         top1k = accuracy(out['logit'][known_idxs], train_y[known_idxs], topk=(1,))[0]
                 
         log_dict = {
             'val_loss': loss, 
             'val_acc': top1k,
-            'softmax': soft_max_auroc,
-            'logit': logit_auroc,
+            # 'softmax': soft_max_auroc,
+            'softmin': softmin_auroc,
             'dist auroc': dist_auroc
             }
         
@@ -310,6 +322,7 @@ class NoiseDist(LightningModule):
     
     def configure_optimizers(self):
         params = self.parameters()
+        
         # optimizer = torch.optim.SGD(params, lr=self.lr, momentum=self.momentum, 
         #                              weight_decay=self.weight_decay)
         optimizer = torch.optim.Adam(params, lr=self.lr, weight_decay=self.weight_decay)
