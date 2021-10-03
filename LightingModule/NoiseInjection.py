@@ -18,11 +18,11 @@ from utils import accuracy
 
 class NoiseEncoder(nn.Module):
     def __init__(self, 
-                 channel_in:  int, 
-                 channel_out: int, 
-                 kernel_size: int, 
-                 stride:      int, 
-                 padding:     int, 
+                 channel_in:  int,
+                 channel_out: int,
+                 kernel_size: int,
+                 stride:      int,
+                 padding:     int,
                  bias:        bool=False, 
                  num_classes: int=6,
                  alpha: float=1.0):
@@ -301,10 +301,7 @@ class NoiseInjection(LightningModule):
         self.log_dict(log_dict)
 
         return loss
-    
-    def on_validation_end(self) -> None:
-        return super().on_validation_end()
-    
+
     def configure_optimizers(self):
         params = self.parameters()
         optimizer = torch.optim.SGD(params, lr=self.lr, momentum=self.momentum, 
