@@ -11,197 +11,189 @@ from data.cifar10 import SplitCifar10, train_transform, val_transform, OpenTestC
 from data.capsule_split import get_splits
 from utils import accuracy
 
-class NoiseLayer(nn.Module):
-    def __init__(self, alpha, num_classes):
-        super(NoiseLayer, self).__init__()
-        # self.alpha = nn.Parameter(torch.ones(1))
-        # self.alpha.data.normal_(1.0, 0.02)
+
+##############################################################
+# noise Layer
+##############################################################
+
+class NoiseEncoder(nn.Module):
+    def __init__(self, 
+                 channel_in:  int, 
+                 channel_out: int, 
+                 kernel_size: int, 
+                 stride:      int, 
+                 padding:     int, 
+                 bias:        bool=False, 
+                 num_classes: int=6,
+                 alpha: float=1.0):
+        
+        super(self.__class__, self).__init__()
+        self.conv = nn.Conv2d(channel_in, channel_out, kernel_size, stride, padding, bias=bias)
+        self.bn = nn.BatchNorm2d(channel_out)
+        self.bn_noise = nn.BatchNorm2d(channel_out)
+        self.activation = nn.LeakyReLU(0.2)
+        self.num_classes = num_classes
+        self.register_buffer('buffer', None)
         self.alpha = alpha
         
-        self.means = None
-        self.std = None
-        self.num_classes = torch.arange(num_classes)
+    def forward(self, x):
+        x = self.conv(x)
+        x = self.bn(x)
+        x = self.activation(x)
+        return x
+    
+    def forward_clean(self, x, class_mask):
+        x = self.conv(x)
+        self.cal_class_per_std(x, class_mask)
+        x = self.bn(x)
+        x = self.activation(x)
+        return x
         
-    def calculate_class_mean(self, 
-                           x: torch.Tensor, 
-                           y: torch.Tensor):
-        """calculate the variance of each classes' noise
-
-        Args:
-            x (torch.Tensor): [input tensor]
-            y (torch.Tensor): [target tensor]
-
-        Returns:
-            [Tensor]: [returns class dependent noise variance]
-        """
-        self.num_classes = self.num_classes.type_as(y)
-        idxs = y.unsqueeze(0) == self.num_classes.unsqueeze(1)
-        mean = []
+    def forward_noise(self, x, newY):
+        x = self.conv(x)
+        x = x + self.alpha * torch.normal(mean=0, std=self.buffer[newY]).type_as(x)
+        x = self.bn_noise(x)
+        x = self.activation(x)
+        return x
+    
+    def cal_class_per_std(self, x, idxs):
         std = []
-        for i in range(self.num_classes.shape[0]):
-            x_ = x[idxs[i]].detach()
-            # mean.append(x_.mean(0))
-            # if len(x_.shape) == 4:
-            #     pass
-            # else:
+        for i in range(self.num_classes):
+            x_ = x[idxs[i]].detach().clone()
+            
             std.append(x_.std(0))
-            # mean.append(x_.mean(0))
-        
-        # self.means = torch.stack(mean)
-        self.std = torch.stack(std)
-        
-    def InstanceNoise(self, x, y):
-        batch, channel, height, width = x.size()
-        newY = torch.randperm(x.size(0)).type_as(y)
-        instd = torch.normal(mean=0, std=x[newY].flatten(2).std(-1)).type_as(x)
-        instd = instd.view(batch, channel, 1, 1).repeat(1, 1, height, width)
-        return x + self.alpha * torch.normal(mean=0, std=instd)
-        
-    def cal_index(self, y):
-        batch_size = y.size(0)
-        
-        #TODO: matching indexes with other classes reduce iteration
-        new_index = torch.randperm(batch_size).type_as(y)
-        newY = y[new_index]
-        mask = (newY == y)
-        while mask.any().item():
-            newY[mask] = torch.randint(0, 6, (torch.sum(mask),)).type_as(y)
-            mask = (newY == y)
-        return newY
-    
-    def forward(self, x, y):
-        #TODO: sampling different noise for each input not per classes
-    
-        # class_noise = torch.normal(mean=0, std=self.std[newY]).type_as(x).detach()
-        newY = self.cal_index(y)
-        class_noise = torch.normal(mean=0, std=self.std[newY]).type_as(x)
-        instance_noise = self.InstanceNoise(x, y)
-        return (instance_noise + self.alpha * class_noise), newY
+        self.buffer = torch.stack(std)
 
-def weights_init(m):
-    classname = m.__class__.__name__
-    if classname.find('Conv') != -1:
-        m.weight.data.normal_(0.0, 0.05)
-    elif classname.find('BatchNorm') != -1:
-        m.weight.data.normal_(1.0, 0.02)
-        m.bias.data.fill_(0)
-
-class classifier32(nn.Module):
-    def __init__(self, num_classes=2, alpha=0.5, **kwargs):
+class Noiseclassifier32(nn.Module):
+    def __init__(self, 
+                 num_classes: int=6,
+                 alpha: int=1.0,
+                 **kwargs):
         super(self.__class__, self).__init__()
         self.num_classes = num_classes
-        self.conv1 = nn.Conv2d(3,       64,     3, 1, 1, bias=False)
-        self.conv2 = nn.Conv2d(64,      64,     3, 1, 1, bias=False)
-        self.conv3 = nn.Conv2d(64,     128,     3, 2, 1, bias=False)
-
-        self.conv4 = nn.Conv2d(128,    128,     3, 1, 1, bias=False)
-        self.conv5 = nn.Conv2d(128,    128,     3, 1, 1, bias=False)
-        self.conv6 = nn.Conv2d(128,    128,     3, 2, 1, bias=False)
-
-        self.conv7 = nn.Conv2d(128,    128,     3, 1, 1, bias=False)
-        self.conv8 = nn.Conv2d(128,    128,     3, 1, 1, bias=False)
-        self.conv9 = nn.Conv2d(128,    128,     3, 2, 1, bias=False)
-
-        self.bn1 = nn.BatchNorm2d(64)
-        self.bn2 = nn.BatchNorm2d(64)
-        self.bn3 = nn.BatchNorm2d(128)
-
-        self.bn4 = nn.BatchNorm2d(128)
-        self.bn5 = nn.BatchNorm2d(128)
-        self.bn6 = nn.BatchNorm2d(128)
-
-        self.bn7 = nn.BatchNorm2d(128)
-        self.bn8 = nn.BatchNorm2d(128)
-        self.bn9 = nn.BatchNorm2d(128)
-
-        self.fc1 = nn.Linear(128, num_classes)
+        
+        self.conv1 = NoiseEncoder(3,     64,    3, 1, 1, bias=False, num_classes=num_classes)
+        self.conv2 = NoiseEncoder(64,    64,    3, 1, 1, bias=False, num_classes=num_classes)
+        self.conv3 = NoiseEncoder(64,   128,    3, 2, 1, bias=False, num_classes=num_classes)
+        
+        self.conv4 = NoiseEncoder(128,  128,    3, 1, 1, bias=False, num_classes=num_classes)
+        self.conv5 = NoiseEncoder(128,  128,    3, 1, 1, bias=False, num_classes=num_classes)
+        self.conv6 = NoiseEncoder(128,  128,    3, 2, 1, bias=False, num_classes=num_classes)
+        
+        self.conv7 = NoiseEncoder(128,  128,    3, 1, 1, bias=False, num_classes=num_classes)
+        self.conv8 = NoiseEncoder(128,  128,    3, 1, 1, bias=False, num_classes=num_classes)
+        self.conv9 = NoiseEncoder(128,  128,    3, 2, 1, bias=False, num_classes=num_classes)
+        
+        self.fc = nn.Linear(128, num_classes + 1)
         self.dr1 = nn.Dropout2d(0.2)
         self.dr2 = nn.Dropout2d(0.2)
         self.dr3 = nn.Dropout2d(0.2)
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        
+        self.apply(self.weights_init)
+        
+        
+    def weights_init(self, m):
+        classname = m.__class__.__name__
+        if classname.find('Conv') != -1:
+            m.weight.data.normal_(0.0, 0.05)
+        elif classname.find('BatchNorm') != -1:
+            m.weight.data.normal_(1.0, 0.02)
+            m.bias.data.fill_(0)
 
-        self.noise0 = NoiseLayer(alpha, num_classes)
-        self.noise1 = NoiseLayer(alpha, num_classes)
-        self.noise2 = NoiseLayer(alpha, num_classes)
-        self.noise3 = NoiseLayer(alpha, num_classes)
-        
-        self.apply(weights_init)
-        
-    def forward(self, x, y,  noise=[]):
+    def forward(self, x):
         batch_size = len(x)
-        ny = []
         x = self.dr1(x)
         x = self.conv1(x)
-        x = self.bn1(x)
-        x = nn.LeakyReLU(0.2)(x)
-
+        
         x = self.conv2(x)
-        x = self.bn2(x)
-        x = nn.LeakyReLU(0.2)(x)
-
         x = self.conv3(x)
-        x = self.bn3(x)
-        l1 = nn.LeakyReLU(0.2)(x)
         
-        # if len(noise) == 0:
-        # self.noise0.calculate_class_mean(l1, y)
-        if 0 in noise:
-            l1, ny0 = self.noise0(l1, y)
-            # l1 = self.noise0.InstanceNoise(l1, y)
-            ny.append(ny0)
-
-        x = self.dr2(l1)
+        x = self.dr2(x)
         x = self.conv4(x)
-        x = self.bn4(x)
-        x = nn.LeakyReLU(0.2)(x)
-        
         x = self.conv5(x)
-        x = self.bn5(x)
-        x = nn.LeakyReLU(0.2)(x)
-        
         x = self.conv6(x)
-        x = self.bn6(x)
-        l2 = nn.LeakyReLU(0.2)(x)
         
-        # if len(noise) == 0:
-        # self.noise1.calculate_class_mean(l2, y)
-        if 1 in noise:
-            l2_n, ny1 = self.noise1(l2, y)
-            # l2 = self.noise0.InstanceNoise(l2, y)
-            ny.append(ny1)
-
-            l2 = torch.cat([l2, l2_n], 0)        
-        # print(l2.shape)
-        x = self.dr3(l2)
+        x = self.dr3(x)
         x = self.conv7(x)
-        x = self.bn7(x)
-        x = nn.LeakyReLU(0.2)(x)
         x = self.conv8(x)
-        x = self.bn8(x)
-        x = nn.LeakyReLU(0.2)(x)
         x = self.conv9(x)
-        x = self.bn9(x)
-        l3 = nn.LeakyReLU(0.2)(x)
         
-        l3 = self.avgpool(l3)
-        l3 = l3.view(l3.shape[0], -1)
-        # if len(noise) == 0:
-        # self.noise2.calculate_class_mean(l3, y)
-        # if 2 in noise:
-        #     l3, ny2 = self.noise2(l3, y)
-        #     ny.append(ny2)
+        x = self.avgpool(x)
+        x = x.view(x.shape[0], -1)
         
-        # print(l3.shape)
-        y = self.fc1(l3)
+        logit = self.fc(x)
+        
+        return logit
+    
+    def forward_clean(self, x, y):
+        batch_size = len(x)
+        class_mask = y.unsqueeze(0) == torch.arange(self.num_classes).type_as(y).unsqueeze(1)
+        x = self.dr1(x)
+        x = self.conv1.forward_clean(x, class_mask)
+        x = self.conv2.forward_clean(x, class_mask)
+        x = self.conv3.forward_clean(x, class_mask)
+        
+        x = self.dr2(x)
+        x = self.conv4.forward_clean(x, class_mask)
+        x = self.conv5.forward_clean(x, class_mask)
+        x = self.conv6.forward_clean(x, class_mask)
+        
+        x = self.dr3(x)
+        x = self.conv7.forward_clean(x, class_mask)
+        x = self.conv8.forward_clean(x, class_mask)
+        x = self.conv9.forward_clean(x, class_mask)
+        
+        x = self.avgpool(x)
+        x = x.view(x.shape[0], -1)
+        
+        logit = self.fc(x)
         
         return {
-            'logit': y,
-            'l3': l3,
-            'l2': l2,
-            'l1': l1,
-            'ny': ny
+            "logit": logit,
+            "emb": x
         }
-
+    
+    def forward_noise(self, x, y, noise_layer=[]):
+        batch_size = len(x)
+        newY = self.cal_index(y)
+        # newY = y
+        
+        x = self.dr1(x)
+        x = self.conv1.forward_noise(x, newY)
+        x = self.conv2.forward_noise(x, newY)
+        x = self.conv3.forward_noise(x, newY)
+        
+        x = self.dr2(x)
+        x = self.conv4.forward_noise(x, newY)
+        x = self.conv5.forward_noise(x, newY)
+        x = self.conv6.forward_noise(x, newY)
+        
+        x = self.dr3(x)
+        x = self.conv7.forward_noise(x, newY)
+        x = self.conv8.forward_noise(x, newY)
+        x = self.conv9.forward_noise(x, newY)
+        
+        x = self.avgpool(x)
+        x = x.view(x.shape[0], -1)
+        
+        logit = self.fc(x)
+        
+        return {
+            'logit': logit,
+            'newY': newY,
+            'emb': x
+        }
+        
+    def cal_index(self, y):
+        batch_size = y.size(0)
+        new_index = torch.randperm(batch_size).type_as(y)
+        newY = y[new_index]
+        mask = (newY == y)
+        while mask.any().item():
+            newY[mask] = torch.randint(0, self.num_classes, (torch.sum(mask),)).type_as(y)
+            mask = (newY == y)
+        return newY
 
 class NoiseInjection(LightningModule):
     def __init__(self,
@@ -235,8 +227,8 @@ class NoiseInjection(LightningModule):
         
         self.splits = get_splits(dataset, class_split)
         
-        self.model = classifier32(num_classes=len(self.splits['known_classes']), alpha=self.alpha)
-        self.dummy_fc = nn.Linear(self.latent_size, len(self.splits['known_classes']))
+        self.model = Noiseclassifier32(num_classes=len(self.splits['known_classes']), alpha=self.alpha)
+        # self.dummy_fc = nn.Linear(self.latent_size, 1)
 
         self.criterion = nn.CrossEntropyLoss()
         self.kld = nn.KLDivLoss(reduction='batchmean')
@@ -254,34 +246,23 @@ class NoiseInjection(LightningModule):
         x, y = batch
         
         batch_size = len(x)
+        clean_out = self.model.forward_clean(x, y)
+        closs = self.criterion(clean_out['logit'], y)
         
-        out = self(x, y, [])
-        if len(out['logit']) > batch_size:
-            origin = out['logit'][:batch_size]
-        else:
-            origin = out['logit']
-            
-        top1k = accuracy(origin, y, topk=(1,))[0]
+        noise_out = self.model.forward_noise(x, y)
+        # open_loss = self.criterion(noise_out['logit'], torch.ones_like(y) * 6)
+        # open_loss = self.kldiv(noise_out['logit'].softmax(-1), clean_out['logit'].softmax(-1).detach()).mean()
+        open_loss = self.criterion(noise_out['logit'], y) * 0.5 + \
+            self.criterion(noise_out['logit'], noise_out['newY']) * 0.5
+        top1k = accuracy(clean_out['logit'], y, topk=(1,))[0]
 
-        closs = self.criterion(origin, y)
         
-        # m_logit = out['logit'][batch_size:].softmax(-1)
-        # uniform_dist = torch.ones_like(m_logit).softmax(-1)
-        
-        # kld = (uniform_dist * (uniform_dist / m_logit).log()).sum(-1).mean()
-        # kld = self.kld(m_logit.log(), uniform_dist)
-        # origin_max = origin.softmax(-1).max(-1)[0]
-        # noise_max = m_logit.max(-1)[0]
-        
-        # mrl = self.mrl(origin_max, noise_max, torch.ones_like(origin_max))
-        # loss = closs + kld * 0.5
-        # loss = closs + kld + mrl
-        loss = closs
+        loss = closs + open_loss
         
         log_dict = {
-            # 'classification loss': closs,
+            'classification loss': closs,
             'train acc': top1k,
-            # 'kld': kld,
+            'open loss': open_loss,
             # 'ranking': mrl,
             'total loss': loss
         }
@@ -290,30 +271,31 @@ class NoiseInjection(LightningModule):
         self.log_dict(log_dict, on_step=True)
         
         return loss
-    
-    
+
     def validation_step(self, batch, batch_idx):
         x, train_y, y, known_idxs = batch
        
-        out = self(x, train_y, [])
+        out = self.model(x)
         
-        loss = self.criterion(out['logit'][known_idxs], train_y[known_idxs])
+        loss = self.criterion(out[known_idxs], train_y[known_idxs])
         
+        # print(out.softmax(-1).shape)
+        # exit()
         
-        soft_max_logit = torch.softmax(out['logit'], dim=-1)
+        soft_max_logit = torch.softmax(out, dim=-1)
         soft_max_auroc = self.auroc(soft_max_logit.max(-1)[0], known_idxs.long())
-        logit_auroc = self.auroc(out['logit'].max(-1)[0], known_idxs.long())
+        logit_auroc = self.auroc(out.max(-1)[0], known_idxs.long())
         
-        top1k = accuracy(out['logit'][known_idxs], train_y[known_idxs], topk=(1,))[0]
+        # print(kld_result.shape)
+        # exit()
+        
+        top1k = accuracy(out[known_idxs], train_y[known_idxs], topk=(1,))[0]
         
         log_dict = {
             'val_loss': loss, 
             'val_acc': top1k,
             'softmax': soft_max_auroc,
             'logit': logit_auroc,
-            # 'alpha0': self.model.noise0.alpha.data.item(),
-            # 'alpha1': self.model.noise1.alpha.data.item(),
-            # 'alpha2': self.model.noise2.alpha.data.item(),
             }
         
         self.log_dict(log_dict)
@@ -337,15 +319,15 @@ class NoiseInjection(LightningModule):
         #     patience=20
         #     )
         
-        # COSINE ANNEALING
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100, eta_min=1e-3)
+        # # COSINE ANNEALING
+        # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100, eta_min=1e-3)
 
         # MULTI SETP LR
-        # scheduler = torch.optim.lr_scheduler.MultiStepLR(
-        #     optimizer,
-        #     milestones=[50],
-        #     gamma=0.5
-        # )
+        scheduler = torch.optim.lr_scheduler.MultiStepLR(
+            optimizer,
+            milestones=[70],
+            gamma=0.5
+        )
         
         return {
             'optimizer': optimizer,
@@ -389,3 +371,7 @@ class NoiseInjection(LightningModule):
         parser.add_argument("--alpha", type=float, default=1.0)
 
         return parser
+    
+    def kldiv(self, P, Q):
+        return (P * (P / Q).log()).sum(-1)
+    
