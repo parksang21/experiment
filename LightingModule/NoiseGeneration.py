@@ -1,3 +1,4 @@
+from sys import setdlopenflags
 from pytorch_lightning import LightningModule
 from argparse import ArgumentParser
 
@@ -10,73 +11,7 @@ import wandb
 from data.cifar10 import SplitCifar10, train_transform, val_transform, OpenTestCifar10
 from data.capsule_split import get_splits
 from utils import accuracy
-
-class NoiseLayer(nn.Module):
-    def __init__(self, alpha, num_classes):
-        super(NoiseLayer, self).__init__()
-        # self.alpha = nn.Parameter(torch.ones(1))
-        # self.alpha.data.normal_(1.0, 0.02)
-        self.alpha = alpha
-        
-        self.means = None
-        self.std = None
-        self.num_classes = torch.arange(num_classes)
-        
-    def calculate_class_mean(self, 
-                           x: torch.Tensor, 
-                           y: torch.Tensor):
-        """calculate the variance of each classes' noise
-
-        Args:
-            x (torch.Tensor): [input tensor]
-            y (torch.Tensor): [target tensor]
-
-        Returns:
-            [Tensor]: [returns class dependent noise variance]
-        """
-        self.num_classes = self.num_classes.type_as(y)
-        idxs = y.unsqueeze(0) == self.num_classes.unsqueeze(1)
-        mean = []
-        std = []
-        for i in range(self.num_classes.shape[0]):
-            x_ = x[idxs[i]].detach()
-            # mean.append(x_.mean(0))
-            # if len(x_.shape) == 4:
-            #     pass
-            # else:
-            std.append(x_.std(0))
-            # mean.append(x_.mean(0))
-        
-        # self.means = torch.stack(mean)
-        self.std = torch.stack(std)
-        
-    def InstanceNoise(self, x, y):
-        batch, channel, height, width = x.size()
-        newY = torch.randperm(x.size(0)).type_as(y)
-        instd = torch.normal(mean=0, std=x[newY].flatten(2).std(-1)).type_as(x)
-        instd = instd.view(batch, channel, 1, 1).repeat(1, 1, height, width)
-        return x + self.alpha * torch.normal(mean=0, std=instd)
-        
-    def cal_index(self, y):
-        batch_size = y.size(0)
-        
-        #TODO: matching indexes with other classes reduce iteration
-        new_index = torch.randperm(batch_size).type_as(y)
-        newY = y[new_index]
-        mask = (newY == y)
-        while mask.any().item():
-            newY[mask] = torch.randint(0, 6, (torch.sum(mask),)).type_as(y)
-            mask = (newY == y)
-        return newY
-    
-    def forward(self, x, y):
-        #TODO: sampling different noise for each input not per classes
-    
-        # class_noise = torch.normal(mean=0, std=self.std[newY]).type_as(x).detach()
-        newY = self.cal_index(y)
-        class_noise = torch.normal(mean=0, std=self.std[newY]).type_as(x)
-
-        return (x + self.alpha * class_noise), newY
+import numpy as np
 
 def weights_init(m):
     classname = m.__class__.__name__
@@ -87,7 +22,7 @@ def weights_init(m):
         m.bias.data.fill_(0)
 
 class classifier32(nn.Module):
-    def __init__(self, num_classes=2, alpha=0.5, **kwargs):
+    def __init__(self, num_classes=2, **kwargs):
         super(self.__class__, self).__init__()
         self.num_classes = num_classes
         self.conv1 = nn.Conv2d(3,       64,     3, 1, 1, bias=False)
@@ -119,17 +54,10 @@ class classifier32(nn.Module):
         self.dr2 = nn.Dropout2d(0.2)
         self.dr3 = nn.Dropout2d(0.2)
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
-
-        self.noise0 = NoiseLayer(alpha, num_classes)
-        self.noise1 = NoiseLayer(alpha, num_classes)
-        self.noise2 = NoiseLayer(alpha, num_classes)
-        self.noise3 = NoiseLayer(alpha, num_classes)
         
         self.apply(weights_init)
         
-    def forward(self, x, y,  noise=[]):
-        batch_size = len(x)
-        ny = []
+    def block0(self, x):
         x = self.dr1(x)
         x = self.conv1(x)
         x = self.bn1(x)
@@ -141,15 +69,11 @@ class classifier32(nn.Module):
 
         x = self.conv3(x)
         x = self.bn3(x)
-        l1 = nn.LeakyReLU(0.2)(x)
-        
-        if len(noise) == 0:
-            self.noise0.calculate_class_mean(l1, y)
-        if 0 in noise:
-            l1, ny0 = self.noise0(l1, y)
-            ny.append(ny0)
-
-        x = self.dr2(l1)
+        x = nn.LeakyReLU(0.2)(x)
+        return x
+    
+    def block1(self, x):
+        x = self.dr2(x)
         x = self.conv4(x)
         x = self.bn4(x)
         x = nn.LeakyReLU(0.2)(x)
@@ -160,15 +84,11 @@ class classifier32(nn.Module):
         
         x = self.conv6(x)
         x = self.bn6(x)
-        l2 = nn.LeakyReLU(0.2)(x)
-        
-        if len(noise) == 0:
-            self.noise1.calculate_class_mean(l2, y)
-        if 1 in noise:
-            l2, ny1 = self.noise1(l2, y)
-            ny.append(ny1)
-
-        x = self.dr3(l2)
+        x = nn.LeakyReLU(0.2)(x) 
+        return x
+    
+    def block2(self, x):
+        x = self.dr3(x)
         x = self.conv7(x)
         x = self.bn7(x)
         x = nn.LeakyReLU(0.2)(x)
@@ -177,15 +97,17 @@ class classifier32(nn.Module):
         x = nn.LeakyReLU(0.2)(x)
         x = self.conv9(x)
         x = self.bn9(x)
-        l3 = nn.LeakyReLU(0.2)(x)
+        x = nn.LeakyReLU(0.2)(x)
         
-        l3 = self.avgpool(l3)
-        l3 = l3.view(batch_size, -1)
-        if len(noise) == 0:
-            self.noise2.calculate_class_mean(l3, y)
-        if 2 in noise:
-            l3, ny2 = self.noise2(l3, y)
-            ny.append(ny2)
+        x = self.avgpool(x)
+        x = x.view(x.shape[0], -1)
+        
+        return x
+        
+    def forward(self, x):
+        l1 = self.block0(x)
+        l2 = self.block1(l1)
+        l3 = self.block2(l2)
         
         y = self.fc1(l3)
         
@@ -194,10 +116,37 @@ class classifier32(nn.Module):
             'l3': l3,
             'l2': l2,
             'l1': l1,
-            'ny': ny
         }
+        
+    def forward_l2(self, x):
+        l3 = self.block2(x)
+        
+        logit = self.fc1(l3)
+        return logit
 
-
+class ConvBlock(nn.Module):
+    def __init__(self, 
+                 in_channel: int=128,
+                 out_channel: int=128,
+                 kernal_size: int=3,
+                 stride: int=1,
+                 padding: int=1,
+                 **kwargs):
+        super(self.__class__, self).__init__()
+        
+        self.conv1 = nn.Conv2d(in_channel, out_channel, kernal_size, stride, padding, bias=False)
+        self.bn = nn.BatchNorm2d(out_channel)
+        self.activation = nn.LeakyReLU(0.2)
+        
+        self.apply(weights_init)
+        
+    def forward(self, x):
+        out = self.conv1(x)
+        out = self.bn(out)
+        out = self.activation(out)
+        
+        return x + out
+        
 class NoiseGeneration(LightningModule):
     def __init__(self,
                  lr: float = 0.01,
@@ -213,7 +162,7 @@ class NoiseGeneration(LightningModule):
                  log_dir: str = './log',
                  **kwargs):
         
-        super(self.__class__.__name__, self).__init__()
+        super(self.__class__, self).__init__()
         
         self.save_hyperparameters()
         self.lr = lr
@@ -229,88 +178,103 @@ class NoiseGeneration(LightningModule):
         self.log_dir = log_dir
         
         self.splits = get_splits(dataset, class_split)
+        self.num_classes = len(self.splits['known_classes'])
         
-        self.model = classifier32(num_classes=len(self.splits['known_classes']), alpha=self.alpha)
-        self.centers = nn.Embedding(len(self.splits['known_classes']), self.latent_size)
-        self.triplet = nn.TripletMarginLoss(margin=5, p=2)
-        self.softmin = nn.Softmin(dim=1)
+        self.model = classifier32(num_classes=len(self.splits['known_classes']))
+        # self.memory = nn.Parameter(torch.randn(6, 128, 8, 8, requires_grad=True))
+        self.convB = ConvBlock(in_channel=128, out_channel=128, kernal_size=3, stride=1, padding=1)
+        self.oFC = nn.Linear(128, 3)
 
         self.criterion = nn.CrossEntropyLoss()
         self.kld = nn.KLDivLoss()
-        self.auroc = AUROC(pos_label=1)
+        self.auroc1 = AUROC(pos_label=1)
+        self.auroc2 = AUROC(pos_label=1)
+        self.auroc3 = AUROC(pos_label=1)
         
+        # self.automatic_optimization = False
+
     def on_train_start(self) -> None:
-        wandb.save(self.log_dir+f"/{__file__.split('/')[-1]}")
+        wandb.save(self.log_dir+f"/{__file__.split('/')[-1]}")    
     
-    
-    
-    def forward(self, x, y, noise=[]):
-        out = self.model(x, y, noise)
+    def forward(self, x):
+        out = self.model(x)
         return out
         
     def training_step(self, batch, batch_idx):
         x, y = batch
         
-        # forward without noise
-        out = self(x, y, [])
+        out = self(x)
         
-        class_center = self.centers(torch.arange(len(self.splits['known_classes'])).type_as(y))
-        center_dist = (class_center - out['l3'].unsqueeze(1)).pow(2).sum(-1).sqrt()
-        logit = self.softmin(center_dist)
-        closs = self.criterion(logit, y)
         
-        center_loss = (out['l3'] - self.centers(y)).pow(2).sum(-1).sqrt().mean()
+        c_loss = self.criterion(out['logit'], y)
         
-        nout = self(x, y, [1,])
+        acc = accuracy(out['logit'], y)[0]
         
-        triplet_loss = self.triplet(self.centers(y), out['l3'], nout['l3'])
+        new_f = self.convB(out['l2'])
+        new_out = self.model.block2(new_f)
         
-        top1k = accuracy(logit, y, topk=(1,))[0]
+        new_logit = self.oFC(new_out)
+        new_y = new_logit.max(-1)[1]
         
-        loss = closs + center_loss + triplet_loss
+        open_loss = self.criterion(torch.cat([new_logit, out['logit']], dim=1), new_y)
+        
         
         log_dict = {
-            'classification loss': closs,
-            'triplet loss': triplet_loss,
-            'center loss': center_loss,
-            'train acc': top1k,
-            'total loss': loss
+            'classification loss': c_loss,
+            'open loss': open_loss,
+            # 'gen loss': gen_loss,
+            # 'kld loss': kld_loss,
+            'acc': acc
         }
-        
         
         self.log_dict(log_dict, on_step=True)
         
+        loss = c_loss + open_loss
         return loss
+        
+        
+    def kldiv(self, P, Q):
+        return (P * (P / Q).log()).sum(-1)
     
+    def cal_index(self, y):
+        batch_size = y.size(0)
+        new_index = torch.randperm(batch_size).type_as(y)
+        newY = y[new_index]
+        mask = (newY == y)
+        while mask.any().item():
+            newY[mask] = torch.randint(0, self.num_classes, (torch.sum(mask),)).type_as(y)
+            mask = (newY == y)
+        return newY
+       
     
     def validation_step(self, batch, batch_idx):
         x, train_y, y, known_idxs = batch
        
-        out = self(x, train_y, [])
-        
-        # loss = self.criterion(out['logit'][known_idxs], train_y[known_idxs])
-        loss = (out['l3'][known_idxs] - self.centers(train_y[known_idxs])).pow(2).sum(-1).sqrt().mean()
-        
-        # soft_max_logit = torch.softmax(out['logit'], dim=-1)
-        # soft_max_auroc = self.auroc(soft_max_logit.max(-1)[0], known_idxs.long())
-        # logit_auroc = self.auroc(out['logit'].max(-1)[0], known_idxs.long())
-        
-        class_center = self.centers(torch.arange(len(self.splits['known_classes'])).type_as(y))
-        center_dist = (class_center - out['l3'].unsqueeze(1)).pow(2).sum(-1).sqrt()
-        
-        logit = self.softmin(center_dist)
+        out = self(x)
+        new_f = self.convB(out['l2'])
+        new_out = self.model.block2(new_f)
+        new_logit = self.oFC(new_out)
 
-        dist_auroc = self.auroc(center_dist.min(-1)[0], (~known_idxs).long())
-        softmin_auroc = self.auroc(logit.max(-1)[0], (known_idxs).long())
+        total_logit = torch.cat([out['logit'], new_logit], dim=1)
+        total_softmax = total_logit.softmax(-1)[:, :self.num_classes]
+        
+        loss = self.criterion(out['logit'][known_idxs], train_y[known_idxs])
+        
+        soft_max_logit = torch.softmax(out['logit'], dim=-1)
+        soft_max_auroc = self.auroc1(soft_max_logit.max(-1)[0], known_idxs.long())
+        logit_auroc = self.auroc2(out['logit'].max(-1)[0], known_idxs.long())
+        total_softmax_auroc = self.auroc3(total_softmax.max(-1)[0], known_idxs.long())
+        
+        # softmin_auroc = self.auroc(logit.max(-1)[0], (known_idxs).long())
         
         top1k = accuracy(out['logit'][known_idxs], train_y[known_idxs], topk=(1,))[0]
                 
         log_dict = {
-            'val_loss': loss, 
+            'val_loss': loss,
             'val_acc': top1k,
-            # 'softmax': soft_max_auroc,
-            'softmin': softmin_auroc,
-            'dist auroc': dist_auroc
+            'softmax': soft_max_auroc,
+            'logit': logit_auroc,
+            'total_softmax': total_softmax_auroc,
             }
         
         self.log_dict(log_dict)
@@ -321,39 +285,38 @@ class NoiseGeneration(LightningModule):
         return super().on_validation_end()
     
     def configure_optimizers(self):
-        params = self.parameters()
+        # params = self.parameters()
         
         # optimizer = torch.optim.SGD(params, lr=self.lr, momentum=self.momentum, 
         #                              weight_decay=self.weight_decay)
-        optimizer = torch.optim.Adam(params, lr=self.lr, weight_decay=self.weight_decay)
+        optimizer = torch.optim.Adam(self.parameters(),
+                                 lr=self.lr, weight_decay=self.weight_decay)
         
         # REDUCE LR ON PLATEAU
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, 
-            mode='min', 
-            factor=0.5, 
-            patience=10
-            )
+        # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        #     optimizer, 
+        #     mode='min', 
+        #     factor=0.5, 
+        #     patience=10
+        #     )
         
         # COSINE ANNEALING
         # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100, eta_min=1e-6)
 
-        # # MULTI SETP LR
-        # scheduler = torch.optim.lr_scheduler.MultiStepLR(
-        #     optimizer,
-        #     milestones=[50],
-        #     gamma=0.5
-        # )
-        
+        # MULTI SETP LR
+        scheduler = torch.optim.lr_scheduler.MultiStepLR(
+            optimizer,
+            milestones=[50],
+            gamma=0.1
+        )
         return {
             'optimizer': optimizer,
             'lr_scheduler': {
                 'scheduler': scheduler,
-                'monitor': 'val_loss'
+                # 'monitor': 'val_loss'
             }
         }
-        # return optimizer
-        
+    
     # learning rate warm-up
     def optimizer_step(
         self,
