@@ -4,6 +4,7 @@ from LightingModule.NoiseInjection import NoiseInjection
 from LightingModule.NoiseInj_resnet import NoiseInj_resnet
 # from LightingModule.CVAE_mixup import CVAE
 from LightingModule.NoiseDist import NoiseDist
+from LightingModule.NoiseGeneration import NoiseGeneration
 
 
 model_dict = {
@@ -13,4 +14,5 @@ model_dict = {
     "NoiseInj_resnet": NoiseInj_resnet,
     'NoiseDist': NoiseDist,
     # "CVAE_mixup": CVAE,
+    'NoiseGeneration': NoiseGeneration,
 }
