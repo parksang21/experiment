@@ -66,7 +66,7 @@ class OpenTestCifar10(torchvision.datasets.CIFAR10):
             target = self.target_transform(target)
             
         known_target = True if target in self.split else False
-        tTarget = self.split.index(target) if target in self.split else -1
+        tTarget = self.split.index(target) if target in self.split else 9999
         
         return img, tTarget, target, known_target
     

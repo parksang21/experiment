@@ -214,30 +214,7 @@ class classifier32(nn.Module):
             mask = (newY == y)
         return newY
 
-class CBlock(nn.Module):
-    def __init__(self, 
-                 in_channel: int=128,
-                 out_channel: int=128,
-                 kernal_size: int=3,
-                 stride: int=1,
-                 padding: int=1,
-                 **kwargs):
-        super(self.__class__, self).__init__()
-        
-        self.conv1 = nn.Conv2d(in_channel, out_channel, kernal_size, stride, padding, bias=False)
-        self.bn = nn.BatchNorm2d(out_channel)
-        self.activation = nn.LeakyReLU(0.2)
-        
-        self.apply(weights_init)
-        
-    def forward(self, x):
-        out = self.conv1(x)
-        out = self.bn(out)
-        out = self.activation(out)
-        
-        return x + out
-        
-class NoiseGeneration(LightningModule):
+class CutMix(LightningModule):
     def __init__(self,
                  lr: float = 0.01,
                  momentum: float = 0.9,
