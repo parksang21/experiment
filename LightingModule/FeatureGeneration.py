@@ -469,7 +469,7 @@ class FeatureGeneration(LightningModule):
         G_logit = self.D(gen_out)
         GF_loss = self.criterionD(G_logit, torch.ones_like(G_logit))
         
-        classify_G = self.model.block2(gen_out)
+        classify_G = self.model.block2(gen_out.detach())
         GF_logit = self.model.fc(classify_G)
         
         GC_loss = self.criterion(GF_logit, torch.ones_like(y) * 6)
