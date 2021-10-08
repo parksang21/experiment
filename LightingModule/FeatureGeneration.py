@@ -427,6 +427,8 @@ class FeatureGeneration(LightningModule):
 
         opt_C, opt_G, opt_D = self.optimizers()
         
+        requires_grad(self.model, False)
+        
         l1 = self.model.block0(x)
         l2 = self.model.block1(l1)
 
@@ -460,6 +462,7 @@ class FeatureGeneration(LightningModule):
         
         requires_grad(self.D, False)
         requires_grad(self.G, True)
+        requires_grad(self.model, True)
         
         # Update G
         opt_G.zero_grad()
@@ -482,6 +485,7 @@ class FeatureGeneration(LightningModule):
         
         requires_grad(self.D, False)
         requires_grad(self.G, False)
+        requires_grad(self.model, True)
         
         opt_C.zero_grad()
         l0 = self.model.block0(x)
