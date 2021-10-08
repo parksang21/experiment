@@ -259,8 +259,6 @@ class classifier32(nn.Module):
         win_size = int(H / 2)
         pos = self.get_position()
         
-        
-    
     def forward_swap(self, x, y):
         l1 = self.block0(x)
         
@@ -285,7 +283,56 @@ class classifier32(nn.Module):
             'newY': y[newY]
         }
 
-class Style(LightningModule):
+class Generator(nn.Module):
+    def __init__(self, in_channel, out_channel):
+        super(self.__class__, self).__init__()
+        self.main = nn.Sequential(
+            nn.Conv2d(in_channel, out_channel, 3, 1, 1, bias=False),
+            nn.BatchNorm2d(out_channel),
+            nn.LeakyReLU(0.2),
+            
+            nn.Conv2d(out_channel, out_channel, 3, 1, 1, bias=False),
+            nn.BatchNorm2d(out_channel),
+            nn.LeakyReLU(0.2),
+            
+            nn.Conv2d(in_channel, out_channel, 3, 1, 1, bias=False),
+            nn.BatchNorm2d(out_channel),
+            nn.LeakyReLU(0.2),
+            )
+        
+    def forward(self, x):
+        output = self.main(x)
+        return output
+    
+class Discriminator(nn.Module):
+    def __init__(self, in_channel, out_channel):
+        super(self.__class__, self).__init__()
+        self.main = nn.Sequential(
+            nn.Conv2d(in_channel, out_channel, 3, 1, 1, bias=False),
+            nn.BatchNorm2d(out_channel),
+            nn.LeakyReLU(0.2),
+            
+            nn.Conv2d(in_channel, out_channel, 3, 1, 1, bias=False),
+            nn.BatchNorm2d(out_channel),
+            nn.LeakyReLU(0.2),
+            
+            nn.Conv2d(in_channel, out_channel, 3, 2, 1, bias=False),
+            nn.BatchNorm2d(out_channel),
+            nn.LeakyReLU(0.2),
+        )
+        self.avgpool = nn.AdaptiveAvgPool2d((1,1))
+        self.classifier = nn.Linear(out_channel, 1)
+        self.activation = nn.Sigmoid()
+        
+    def forward(self, x):
+        output = self.main(x)
+        output = self.avgpool(output)
+        output = output.view(output.size(0), -1)
+        output = self.classifier(output).flatten()
+        output = self.activation(output)
+        return output
+
+class FeatureGeneration(LightningModule):
     def __init__(self,
                  lr: float = 0.01,
                  momentum: float = 0.9,
@@ -297,6 +344,8 @@ class Style(LightningModule):
                  class_split: int = 0,
                  latent_size: int = 128,
                  alpha: float = 0.5,
+                 beta: float = 0.5,
+                 gan_lr: float = 0.0002,
                  log_dir: str = './log',
                  **kwargs):
         
@@ -313,6 +362,8 @@ class Style(LightningModule):
         self.class_split = class_split
         self.latent_size = latent_size
         self.alpha = alpha
+        self.beta = beta
+        self.gan_lr = gan_lr
         self.log_dir = log_dir
         
         self.splits = get_splits(dataset, class_split)
@@ -320,6 +371,9 @@ class Style(LightningModule):
         
         self.model = classifier32(num_classes=len(self.splits['known_classes']))
         # self.NewFC = nn.Linear(self.latent_size, self.num_classes * self.num_classes)
+        self.G = Generator(128, 128)
+        self.D = Discriminator(128, 128)
+        self.criterionD = nn.BCELoss()
 
         self.criterion = nn.CrossEntropyLoss()
         self.kld = nn.KLDivLoss()
@@ -338,9 +392,8 @@ class Style(LightningModule):
                     a[j][i] = start
                     start += 1
         self.YM = torch.tensor(a, dtype=torch.long).to(self.device)
-        # self.num_logit = self.YM.max() + 1
         
-        # self.automatic_optimization = False
+        self.automatic_optimization = False
 
     def on_train_start(self) -> None:
         wandb.save(self.log_dir+f"/{__file__.split('/')[-1]}")
@@ -362,53 +415,112 @@ class Style(LightningModule):
         out = self.model(x)
         return out
     
+    
     def on_train_epoch_start(self) -> None:
         self.log_img = True
         
     def training_step(self, batch, batch_idx):
         x, y = batch
         
-        out = self.model.forward_swap(x, y)
-        # out = self.model(x)
+        batch_size = x.size(0)
+        gen_size = batch_size // 6
+
+        opt_C, opt_G, opt_D = self.optimizers()
         
-        # loss = self.criterion(out['logit'], y)
+        l1 = self.model.block0(x)
+        l2 = self.model.block1(l1)
+
+        # opt_C.zero_grad()
+        # self.manual_backward(ce_loss)
+        # opt_C.step()
         
-        # if self.log_img:
-        #     img_dict = dict()
-        #     img1 = out['clean_x'][0].detach().cpu().numpy()
-        #     img2 = out['noise_x'][0].detach().cpu().numpy()
-        #     imgs = np.concatenate([img1, img2], axis=1)
-        #     for i in range(imgs.shape[0]):
-        #         or_img = wandb.Image(imgs[i], caption=f"c_{i}")
-        #         img_dict[f"c_{i}"] = or_img
-        #     wandb.log(img_dict)
-        #     self.log_img = False
+        gen_out = self.G(l2.detach())
         
-        # c_loss = self.criterion(out['clean_logit'], y) * 0.5
+        #########################################
+        # Update Discriminator
+        #########################################
         
-        acc = accuracy(out['clean_logit'], y)[0]
+        requires_grad(self.D, True)
+        requires_grad(self.G, False)
         
-        # open_loss = self.criterion(out['noise_logit'], y) * (1 - self.alpha) + \
-        #     self.criterion(out['noise_logit'], out['newY']) * self.alpha
-        # open_loss = self.criterion(out['noise_logit'], self.num_classes + y)
+        # train real
+        opt_D.zero_grad()
+        DR_logit = self.D(l2.detach())
+        DR_loss = self.criterionD(DR_logit, torch.ones_like(DR_logit))
+        self.manual_backward(DR_loss)
+        # train fake
+        DF_logit = self.D(gen_out.detach())
+        DF_loss = self.criterionD(DF_logit, torch.zeros_like(DR_logit))
+        self.manual_backward(DF_loss)
+        opt_D.step()
         
-        y_mat = self.YM[y, out['newY']].type_as(y)
-        open_loss = self.criterion(out['noise_logit'], y_mat)
+        #########################################
+        # Update Generator
+        #########################################
+        
+        requires_grad(self.D, False)
+        requires_grad(self.G, True)
+        
+        # Update G
+        opt_G.zero_grad()
+        G_logit = self.D(gen_out)
+        GF_loss = self.criterionD(G_logit, torch.ones_like(G_logit))
+        
+        classify_G = self.model.block2(gen_out)
+        GF_logit = self.model.fc(classify_G)
+        
+        GC_loss = self.criterion(GF_logit, torch.ones_like(y) * 6)
+        open_loss = (1 - self.beta) * GF_loss + self.beta * GC_loss
+        # open_loss = GF_loss + GC_loss
+        
+        self.manual_backward(open_loss)
+        opt_G.step()
+        
+        ##########################################
+        # Update Classifier
+        ##########################################
+        
+        requires_grad(self.D, False)
+        requires_grad(self.G, False)
+        
+        opt_C.zero_grad()
+        l0 = self.model.block0(x)
+        l1 = self.model.block1(l0)
+        l2 = self.model.block2(l1)
+        logit = self.model.fc(l2)
+        
+        l1_g = self.G(l1.detach())
+        l2_g = self.model.block2(l1_g)
+        logit_g = self.model.fc(l2_g)
+        
+        ce_loss = self.criterion(logit, y)
+        ge_loss = self.criterion(logit_g, torch.ones_like(y) * 6)
+        classifier_loss = ce_loss + ge_loss / 6
+    
+        self.manual_backward(classifier_loss)
+        opt_C.step()
+        acc = accuracy(logit, y)[0]
+        g_acc = accuracy(logit_g, torch.ones_like(y) * 6)[0]
         
         log_dict = {
-            # 'classification loss': c_loss,
-            'open loss': open_loss,
-            # 'gen loss': gen_loss,
-            # 'kld loss': kld_loss,
-            'acc': acc
+            'classification known': ce_loss,
+            'classification gan': ge_loss,
+            'discriminator_fake': DF_loss,
+            'discriminator_real': DR_loss,
+            'generator': GF_loss,
+            'generator classification learn': GC_loss,
+            # 'total_open': open_loss, 
+            'classificationacc': acc,
+            'gan acc': g_acc,
         }
         
         self.log_dict(log_dict, on_step=True)
         
         # loss = c_loss + open_loss
         # loss = c_loss
-        loss = open_loss
-        return loss        
+        # loss = open_loss
+        loss = ce_loss + DR_loss + DF_loss + open_loss + ce_loss
+        return loss
 
     def validation_step(self, batch, batch_idx):
         x, train_y, y, known_idxs = batch
@@ -456,8 +568,12 @@ class Style(LightningModule):
         
         # optimizer = torch.optim.SGD(params, lr=self.lr, momentum=self.momentum, 
         #                              weight_decay=self.weight_decay)
-        optimizer = torch.optim.Adam(self.parameters(),
+        optimizer = torch.optim.Adam(self.model.parameters(),
                                  lr=self.lr, weight_decay=self.weight_decay)
+        opt_G = torch.optim.Adam(self.G.parameters(), lr=self.gan_lr, 
+                                 betas=(0.5, 0.999))
+        opt_D = torch.optim.Adam(self.D.parameters(), lr=self.gan_lr,
+                                 betas=(0.5, 0.999))
         
         # # REDUCE LR ON PLATEAU
         # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -467,8 +583,8 @@ class Style(LightningModule):
         #     patience=10
         #     )
         
-        # COSINE ANNEALING
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100, eta_min=1e-6)
+        # # COSINE ANNEALING
+        # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100, eta_min=1e-6)
 
         # # MULTI SETP LR
         # scheduler = torch.optim.lr_scheduler.MultiStepLR(
@@ -477,13 +593,14 @@ class Style(LightningModule):
         #     gamma=0.1
         # )
         
-        return {
-            'optimizer': optimizer,
-            # 'lr_scheduler': {
-            #     'scheduler': scheduler,
-            #     # 'monitor': 'val_loss'
-            # }
-        }
+        # return {
+        #     'optimizer': [optimizer, opt_G, opt_D]
+        #     # 'lr_scheduler': {
+        #     #     'scheduler': scheduler,
+        #     #     # 'monitor': 'val_loss'
+        #     # }
+        # }
+        return [optimizer, opt_G, opt_D]
     
     # learning rate warm-up
     def optimizer_step(
@@ -544,5 +661,11 @@ class Style(LightningModule):
         parser.add_argument("--class_split", type=int, default=0)
         
         parser.add_argument("--alpha", type=float, default=0.5)
+        parser.add_argument("--beta", type=float, default=1.0)
+        parser.add_argument("--gan_lr", type=float, default=0.0002)
 
         return parser
+    
+def requires_grad(model, flag=True):
+    for p in model.parameters():
+        p.requires_grad = flag

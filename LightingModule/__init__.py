@@ -7,7 +7,7 @@ from LightingModule.NoiseDist import NoiseDist
 from LightingModule.NoiseGeneration import NoiseGeneration
 from LightingModule.CutMix import CutMix
 from LightingModule.Style import Style
-
+from LightingModule.FeatureGeneration import FeatureGeneration
 
 model_dict = {
     # 'vae': VAE,
@@ -19,4 +19,5 @@ model_dict = {
     'NoiseGeneration': NoiseGeneration,
     'CutMix': CutMix,
     'Style': Style,
+    'FeatureGeneration': FeatureGeneration,
 }
