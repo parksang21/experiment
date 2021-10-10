@@ -77,212 +77,54 @@ class classifier32(nn.Module):
         super(self.__class__, self).__init__()
         self.num_classes = num_classes
         self.alpha = alpha
-        self.conv1 = NoiseEncoder(3,     64,    3, 1, 1, bias=False, num_classes=num_classes)
-        self.conv2 = NoiseEncoder(64,    64,    3, 1, 1, bias=False, num_classes=num_classes)
-        self.conv3 = NoiseEncoder(64,   128,    3, 2, 1, bias=False, num_classes=num_classes)
+        # self.conv1 = NoiseEncoder(3,     64,    3, 1, 1, bias=False, num_classes=num_classes)
+        # self.conv2 = NoiseEncoder(64,    64,    3, 1, 1, bias=False, num_classes=num_classes)
+        # self.conv3 = NoiseEncoder(64,   128,    3, 2, 1, bias=False, num_classes=num_classes)
+        self.block1 = nn.Sequential(
+            nn.Dropout2d(0.2),
+            NoiseEncoder(3,     64,    3, 1, 1, bias=False, num_classes=num_classes),
+            NoiseEncoder(64,    64,    3, 1, 1, bias=False, num_classes=num_classes),
+            NoiseEncoder(64,   128,    3, 2, 1, bias=False, num_classes=num_classes)
+        )
+        self.block2 = nn.Sequential(
+            nn.Dropout2d(0.2),
+            NoiseEncoder(128,  128,    3, 1, 1, bias=False, num_classes=num_classes),
+            NoiseEncoder(128,  128,    3, 1, 1, bias=False, num_classes=num_classes),
+            NoiseEncoder(128,  128,    3, 2, 1, bias=False, num_classes=num_classes)
+        )
+        self.block3 = nn.Sequential(
+            nn.Dropout2d(0.2),
+            NoiseEncoder(128,  128,    3, 1, 1, bias=False, num_classes=num_classes),
+            NoiseEncoder(128,  128,    3, 1, 1, bias=False, num_classes=num_classes),
+            NoiseEncoder(128,  128,    3, 2, 1, bias=False, num_classes=num_classes), 
+        )
         
-        self.conv4 = NoiseEncoder(128,  128,    3, 1, 1, bias=False, num_classes=num_classes)
-        self.conv5 = NoiseEncoder(128,  128,    3, 1, 1, bias=False, num_classes=num_classes)
-        self.conv6 = NoiseEncoder(128,  128,    3, 2, 1, bias=False, num_classes=num_classes)
+        # self.conv4 = NoiseEncoder(128,  128,    3, 1, 1, bias=False, num_classes=num_classes)
+        # self.conv5 = NoiseEncoder(128,  128,    3, 1, 1, bias=False, num_classes=num_classes)
+        # self.conv6 = NoiseEncoder(128,  128,    3, 2, 1, bias=False, num_classes=num_classes)
         
-        self.conv7 = NoiseEncoder(128,  128,    3, 1, 1, bias=False, num_classes=num_classes)
-        self.conv8 = NoiseEncoder(128,  128,    3, 1, 1, bias=False, num_classes=num_classes)
-        self.conv9 = NoiseEncoder(128,  128,    3, 2, 1, bias=False, num_classes=num_classes)
+        # self.conv7 = NoiseEncoder(128,  128,    3, 1, 1, bias=False, num_classes=num_classes)
+        # self.conv8 = NoiseEncoder(128,  128,    3, 1, 1, bias=False, num_classes=num_classes)
+        # self.conv9 = NoiseEncoder(128,  128,    3, 2, 1, bias=False, num_classes=num_classes)
         
         self.fc = nn.Linear(128, num_classes * (num_classes - 1))
-        self.dr1 = nn.Dropout2d(0.2)
-        self.dr2 = nn.Dropout2d(0.2)
-        self.dr3 = nn.Dropout2d(0.2)
+        # self.dr1 = nn.Dropout2d(0.2)
+        # self.dr2 = nn.Dropout2d(0.2)
+        # self.dr3 = nn.Dropout2d(0.2)
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
         self.buffer = None
         self.position = 0
         self.apply(weights_init)
-        
-    def block0(self, x):
-        x = self.dr1(x)
-        x = self.conv1(x)
-        x = self.conv2(x)
-        x = self.conv3(x)
-        return x
-    
-    def block1(self, x):
-        x = self.dr2(x)
-        x = self.conv4(x)
-        x = self.conv5(x)
-        x = self.conv6(x)
 
-        return x
-    
-    def block2(self, x):
-        x = self.dr3(x)
-        x = self.conv7(x)
-        x = self.conv8(x)
-        x = self.conv9(x)
-        
-        x = self.avgpool(x)
-        x = x.view(x.shape[0], -1)
-        
-        return x
-        
     def forward(self, x):
-        l1 = self.block0(x)
-        l2 = self.block1(l1)
-        l3 = self.block2(l2)
-        
-        y = self.fc(l3)
-        
-        return {
-            'logit': y,
-            'l3': l3,
-            'l2': l2,
-            'l1': l1,
-        }
-        
-    def cal_mean_std(self, x, eps=1e-5):
-        size = x.size()
-        assert (len(size) == 4)
-        B, C = size[:2]
-        variance = x.view(B, C, -1).var(dim=2) + eps
-        std = variance.sqrt().view(B, C, 1, 1)
-        mean = x.view(B, C, -1).mean(dim=2).view(B, C, 1, 1)
-        
-        return mean, std
-    
-    def mix_(self, x1, x2):
-        size = x1.size()
-        x1_mean, x1_std = self.cal_mean_std(x1)
-        x2_mean, x2_std = self.cal_mean_std(x2)
-        
-        x1_normalize = (x1 - x1_mean.expand(size)) / x1_std.expand(size)
-        
-        return x1_normalize * x1_std.expand(size) + x2_mean.expand(size)
-    
-    def normalize(self, x, mean, std):
-        size = x.size()
-        return (x - mean.expand(size)) / std.expand(size)
-    
-    def unnormalize(self, x, mean, std):
-        size = x.size()
-        return x * std.expand(size) + mean.expand(size)
-    
-    def cal_std(self, x, y, mean, std):
-        stds = []
-        normalize = (x - mean.expand(x.size())) / std.expand(x.size())
-        idxs = y.unsqueeze(0) == torch.arange(self.num_classes).unsqueeze(1).type_as(y)
-        for i in range(self.num_classes):
-            x_ = normalize[idxs[i]].detach().clone()
-            
-            stds.append(x_.std(0))
-            
-        self.buffer = torch.stack(stds)
-
-    def forward_norm_std(self, x, y):
-        newY = self.cal_index(y)
-        x = self.block0(x)
         x = self.block1(x)
-        
-        mean, std = self.cal_mean_std(x)
-        self.cal_std(x, y, mean, std)
-        x_norm = self.normalize(x, mean, std)
-        x_new = x_norm + self.alpha * torch.normal(mean=0, std=torch.ones_like(x_norm)).type_as(x)
-        x_new = self.unnormalize(x_new, mean, std)
-        
-        clean_x = self.block2(x)
-        clean_logit = self.fc(clean_x)
-        
-        noise_x = self.block2(x_new)
-        noise_logit = self.fc(noise_x)
-        
-        return {
-            'clean_x': x,
-            'clean_logit': clean_logit,
-            'noise_x': x_new,
-            'noise_logit': noise_logit,
-            'mean': mean,
-            'std': std
-        }
-        
-    def forward_l2(self, x):
-        l3 = self.block2(x)
-        
-        logit = self.fc(l3)
-        return {
-            'logit': logit,
-            'l3': l3
-        }
-    
-    def forward_mix(self, x, y):
-        newY = self.cal_index(y)
-
-        l1 = self.block0(x)
-        l2 = self.block1(l1)
-        
-        m_l2 = self.mix_(l2, l2[newY])
-        l3 = self.block2(l2)
-        m_l3 = self.block2(m_l2)
-        
-        logit = self.fc(l3)
-        m_logit = self.fc(m_l3)
-        
-        return {
-            'logit': logit,
-            'l2': l2,
-            'm_l2': m_l2,
-            'm_logit': m_logit,
-            'newY': newY
-        }
-    
-    def cal_index(self, y):
-        batch_size = y.size(0)
-        new_index = torch.randperm(batch_size).type_as(y)
-        newY = y[new_index]
-        mask = (newY == y)
-        while mask.any().item():
-            newY[mask] = torch.randint(0, self.num_classes, (torch.sum(mask),)).type_as(y)
-            mask = (newY == y)
-        return newY
-    
-    def channel_swap(self, x, y):
-        # newY = self.cal_index(y)
-        B, C, H, W = x.size()
-        channel_select = torch.randint(0, C, (int(C * self.alpha),)).type_as(y)
-        # x[:, channel_select, :, :] = x[y][:,channel_select, :, :].clone().detach()
-        x[:, channel_select, :, :] = x[y][:,channel_select, :, :]
-        return x
-    
-    def get_position(self):
-        self.position = (self.position + 1) % 4
-        return self.position
-    
-    def channel_cutmix(self, x, y):
-        B, C, H, W = y.size()
-        win_size = int(H / 2)
-        pos = self.get_position()
-        
-    def forward_swap(self, x, y):
-        l1 = self.block0(x)
-        
-        l2 = self.block1(l1)
-        # m_l2 = self.block1(m_l1)
-        
-        # newY = self.cal_index(y)
-        newY = torch.randperm(x.size(0))
-        m_l2 = self.channel_swap(l2.clone(), newY)
-        
-        l3 = self.block2(l2)
-        m_l3 = self.block2(m_l2)
-        
-        logit = self.fc(l3)
-        m_logit = self.fc(m_l3)
-        
-        return {
-            'clean_logit': logit,
-            # 'l2': l2,
-            'noise_logit': m_logit,
-            'm_l3': m_l3,
-            'newY': y[newY]
-        }
-
+        x = self.block2(x)
+        x = self.block3(x)
+        x = self.avgpool(x)
+        x = x.view(x.size(0), -1)
+        logit = self.fc(x)
+        return logit
+ 
 class Generator(nn.Module):
     def __init__(self, in_channel, out_channel):
         super(self.__class__, self).__init__()
@@ -381,17 +223,17 @@ class FeatureGeneration(LightningModule):
         self.auroc2 = AUROC(pos_label=1)
         self.auroc3 = AUROC(pos_label=1)
         
-        a = [list(range(6)) for _ in range(6)]
-        start = 6
-        for i in range(6):
-            for j in range(i, 6):
-                if i == j:
-                    a[i][j] = i
-                else:
-                    a[i][j] = start
-                    a[j][i] = start
-                    start += 1
-        self.YM = torch.tensor(a, dtype=torch.long).to(self.device)
+        # a = [list(range(6)) for _ in range(6)]
+        # start = 6
+        # for i in range(6):
+        #     for j in range(i, 6):
+        #         if i == j:
+        #             a[i][j] = i
+        #         else:
+        #             a[i][j] = start
+        #             a[j][i] = start
+        #             start += 1
+        # self.YM = torch.tensor(a, dtype=torch.long).to(self.device)
         
         self.automatic_optimization = False
 
@@ -427,95 +269,84 @@ class FeatureGeneration(LightningModule):
 
         opt_C, opt_G, opt_D = self.optimizers()
         
-        requires_grad(self.model, False)
+        scheduler = self.lr_schedulers()
         
-        l1 = self.model.block0(x)
-        l2 = self.model.block1(l1)
-
-        # opt_C.zero_grad()
-        # self.manual_backward(ce_loss)
-        # opt_C.step()
+        ############################################
+        # Update Classifier
+        ############################################
         
-        gen_out = self.G(l2.detach())
+        requires_grad(self.model, True)
+        requires_grad(self.G, False)
+        requires_grad(self.D, False)
         
-        #########################################
+        logit = self.model(x)
+        class_loss = self.criterion(logit, y)
+        
+        opt_C.zero_grad()
+        self.manual_backward(class_loss)
+        opt_C.step()
+        
+        ############################################
         # Update Discriminator
-        #########################################
+        ############################################
         
         requires_grad(self.D, True)
         requires_grad(self.G, False)
+        requires_grad(self.model, False)
         
-        # train real
+        layer1 = self.model.block1(x)
+        layer2 = self.model.block2(layer1)
+        real_score = self.D(layer2)
+        real_loss = self.criterionD(real_score, torch.ones_like(y).float())
+        
+        fake_score = self.D(self.G(layer2))
+        fake_loss = self.criterionD(fake_score, torch.zeros_like(y).float())
+        D_loss = real_loss + fake_loss
+        
         opt_D.zero_grad()
-        DR_logit = self.D(l2.detach())
-        DR_loss = self.criterionD(DR_logit, torch.ones_like(DR_logit))
-        self.manual_backward(DR_loss)
-        # train fake
-        DF_logit = self.D(gen_out.detach())
-        DF_loss = self.criterionD(DF_logit, torch.zeros_like(DR_logit))
-        self.manual_backward(DF_loss)
+        self.manual_backward(D_loss)
         opt_D.step()
         
-        #########################################
+        ###########################################
         # Update Generator
-        #########################################
-        
-        requires_grad(self.D, False)
+        ###########################################
+
+        requires_grad(self.model, False)
         requires_grad(self.G, True)
-        requires_grad(self.model, True)
+        requires_grad(self.D, False)
+        requires_grad(self.model.block3, True)
+        requires_grad(self.model.fc, True)
         
-        # Update G
+        layer1 = self.model.block1(x)
+        layer2 = self.model.block2(layer1)
+        gen_feat = self.G(layer2)
+        layer3 = self.model.block3(gen_feat)
+        layer3 = self.model.avgpool(layer3)
+        layer3 = layer3.view(layer3.size(0), -1)
+        gen_fc = self.model.fc(layer3)
+        
+        fake_real = self.D(gen_feat)
+        G_real_loss = self.criterionD(fake_real, torch.ones_like(y).float())
+        open_loss = self.criterion(gen_fc, torch.ones_like(y) * 6) * 0.1
+        
+        G_loss = G_real_loss + open_loss
+        opt_C.zero_grad()
         opt_G.zero_grad()
-        G_logit = self.D(gen_out)
-        GF_loss = self.criterionD(G_logit, torch.ones_like(G_logit))
-        
-        classify_G = self.model.block2(gen_out.detach())
-        GF_logit = self.model.fc(classify_G)
-        
-        GC_loss = self.criterion(GF_logit, torch.ones_like(y) * 6)
-        open_loss = (1 - self.beta) * GF_loss + self.beta * GC_loss
-        # open_loss = GF_loss + GC_loss
-        
-        self.manual_backward(open_loss)
+        self.manual_backward(G_loss)
+        opt_C.step()
         opt_G.step()
         
-        ##########################################
-        # Update Classifier
-        ##########################################
-        
-        requires_grad(self.D, False)
-        requires_grad(self.G, False)
-        requires_grad(self.model, True)
-        
-        opt_C.zero_grad()
-        l0 = self.model.block0(x)
-        l1 = self.model.block1(l0)
-        l2 = self.model.block2(l1)
-        logit = self.model.fc(l2)
-        
-        l1_g = self.G(l1.detach())
-        l2_g = self.model.block2(l1_g)
-        logit_g = self.model.fc(l2_g)
-        
-        ce_loss = self.criterion(logit, y)
-        ge_loss = self.criterion(logit_g, torch.ones_like(y) * 6)
-        classifier_loss = ce_loss + ge_loss / 6
-    
-        self.manual_backward(classifier_loss)
-        opt_C.step()
-        acc = accuracy(logit, y)[0]
-        g_acc = accuracy(logit_g, torch.ones_like(y) * 6)[0]
-        
+        # if self.trainer.is_last_batch:
+        #     scheduler.step()
+               
         log_dict = {
-            'classification known': ce_loss,
-            'classification gan': ge_loss,
-            'discriminator_fake': DF_loss,
-            'discriminator_real': DR_loss,
-            'generator': GF_loss,
-            'generator classification learn': GC_loss,
-            # 'total_open': open_loss, 
-            'classificationacc': acc,
-            'gan acc': g_acc,
+            'classify': class_loss,
+            'oepn': open_loss,
+            
+            'D/real': real_loss,
+            'D/fake': fake_loss,
+            'G/real': G_real_loss,
+            'G/class': open_loss,
         }
         
         self.log_dict(log_dict, on_step=True)
@@ -523,7 +354,8 @@ class FeatureGeneration(LightningModule):
         # loss = c_loss + open_loss
         # loss = c_loss
         # loss = open_loss
-        loss = ce_loss + DR_loss + DF_loss + open_loss + ce_loss
+        # loss = ce_loss + DR_loss + DF_loss + open_loss + ce_loss
+        loss = class_loss + open_loss
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -531,32 +363,36 @@ class FeatureGeneration(LightningModule):
         
         out = self.model(x)
         
-        pred = out['logit'].max(-1)[1]
+        pred = out.max(-1)[1]
         known = pred < 6
         unknown = pred >= 6
         
         pred[known] = 1
         pred[unknown] = 0
          
-        # # open_acc = pred.eq(known_idxs.long()).sum().item() / known_idxs.size(0)
-        f1_score = f1(pred, known_idxs.long(), num_classes=2)
+        # open_acc = pred.eq(known_idxs.long()).sum().item() / known_idxs.size(0)
+        f1_score = f1(pred, known_idxs.long(), num_classes=2, average='macro')
         
-        loss = self.criterion(out['logit'][known_idxs], train_y[known_idxs])
+        loss = self.criterion(out[known_idxs], train_y[known_idxs])
         
-        soft_max_logit = torch.softmax(out['logit'][:,:6], dim=-1)
+        soft_max_logit = torch.softmax(out[:,:6], dim=-1)
         soft_max_auroc = self.auroc1(soft_max_logit.max(-1)[0], known_idxs.long())
-        logit_auroc = self.auroc2(out['logit'][:, :6].max(-1)[0], known_idxs.long())
+        logit_auroc = self.auroc2(out[:, :6].max(-1)[0], known_idxs.long())
         
         # softmin_auroc = self.auroc(logit.max(-1)[0], (known_idxs).long())
         
-        top1k = accuracy(out['logit'][known_idxs], train_y[known_idxs], topk=(1,))[0]
+        top1k = accuracy(out[known_idxs], train_y[known_idxs], topk=(1,))[0]
+        
+        # unknown_acc = f1(pred[unknown], torch.zeros_like(pred[unknown]), num_classes=1, average='macro')
+        unknown_acc = pred[unknown].eq(torch.zeros_like(pred[unknown])).sum().item() / len(unknown)
         
         log_dict = {
             'val_loss': loss,
             'val_acc': top1k,
             'softmax': soft_max_auroc,
             'logit': logit_auroc,
-            'open f1': f1_score
+            'open f1': f1_score,
+            'unknown acc': unknown_acc
             # 'total_softmax': total_softmax_auroc,
             }
         
@@ -574,6 +410,10 @@ class FeatureGeneration(LightningModule):
         #                              weight_decay=self.weight_decay)
         optimizer = torch.optim.Adam(self.model.parameters(),
                                  lr=self.lr, weight_decay=self.weight_decay)
+        
+        # gen_params = list(self.G.parameters()) + list(self.model.block3.parameters()) + \
+        #     list(self.model.fc.parameters())
+            
         opt_G = torch.optim.Adam(self.G.parameters(), lr=self.gan_lr, 
                                  betas=(0.5, 0.999))
         opt_D = torch.optim.Adam(self.D.parameters(), lr=self.gan_lr,
@@ -587,8 +427,8 @@ class FeatureGeneration(LightningModule):
         #     patience=10
         #     )
         
-        # # COSINE ANNEALING
-        # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100, eta_min=1e-6)
+        # COSINE ANNEALING
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100, eta_min=1e-6)
 
         # # MULTI SETP LR
         # scheduler = torch.optim.lr_scheduler.MultiStepLR(
@@ -604,6 +444,7 @@ class FeatureGeneration(LightningModule):
         #     #     # 'monitor': 'val_loss'
         #     # }
         # }
+        # return [optimizer, opt_G, opt_D], [scheduler]
         return [optimizer, opt_G, opt_D]
     
     # learning rate warm-up
