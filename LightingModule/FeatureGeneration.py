@@ -130,6 +130,15 @@ class classifier32(nn.Module):
         
         return x
     
+    def block1_n(self, x, y):
+        class_mask = y.unsqueeze(0) == torch.arange(
+            self.num_classes).type_as(y).unsqueeze(1)
+        x = self.dr1(x)
+        x = self.conv1(x)
+        x = self.conv2(x)
+        clean, noise = self.conv3.forward_clean(x, y, class_mask)
+        return clean, noise
+    
     def block2(self, x):
         x = self.dr2(x)
         x = self.conv4(x)
@@ -171,7 +180,11 @@ class Generator(nn.Module):
             nn.BatchNorm2d(out_channel),
             nn.LeakyReLU(0.2),
             
-            nn.Conv2d(in_channel, out_channel, 3, 1, 1, bias=False),
+            nn.Conv2d(out_channel, out_channel, 3, 1, 1, bias=False),
+            nn.BatchNorm2d(out_channel),
+            nn.LeakyReLU(0.2),
+            
+            nn.Conv2d(out_channel, out_channel, 3, 1, 1, bias=False),
             nn.BatchNorm2d(out_channel),
             nn.ReLU(True),
             )
@@ -184,6 +197,10 @@ class Discriminator(nn.Module):
     def __init__(self, in_channel, out_channel):
         super(self.__class__, self).__init__()
         self.main = nn.Sequential(
+            nn.Conv2d(in_channel, out_channel, 3, 1, 1, bias=False),
+            nn.BatchNorm2d(out_channel),
+            nn.LeakyReLU(0.2),
+            
             nn.Conv2d(in_channel, out_channel, 3, 1, 1, bias=False),
             nn.BatchNorm2d(out_channel),
             nn.LeakyReLU(0.2),
@@ -308,9 +325,9 @@ class FeatureGeneration(LightningModule):
         requires_grad(self.model, True)
         requires_grad(self.G, True)
         
-        l1 = self.model.block1(x)
-        l2_clean, l2_noise = self.model.block2_n(l1, y)
-        fake_feature = self.G(l2_noise)
+        l1_clean, l1_noise = self.model.block1_n(x, y)
+        # l2_clean, l2_noise = self.model.block2_n(l1, y)
+        fake_feature = self.G(l1_noise)
         
         ##################################################
         # Train Discriminator
@@ -319,7 +336,7 @@ class FeatureGeneration(LightningModule):
         requires_grad(self.G, False)
         requires_grad(self.model, False)
 
-        Dreal = self.D(l2_clean.detach())
+        Dreal = self.D(l1_clean.detach())
         Dfake = self.D(fake_feature.detach())
 
         Dreal_loss = self.criterionD(Dreal, torch.ones(Dreal.size()).to(self.device))
@@ -342,18 +359,21 @@ class FeatureGeneration(LightningModule):
         
         Greal_loss = self.criterionD(Greal, torch.ones(Greal.size()).to(self.device))
         
+        l2_clean = self.model.block2(l1_clean)
         Ologit = self.model.block3(l2_clean)
-        noise_logit = self.model.block3(fake_feature)
+        
+        Nlogit = self.model.block2(fake_feature)
+        noise_logit = self.model.block3(Nlogit)
         
         # Gclass_loss = self.criterion(noise_logit, torch.ones_like(y) * 6)
-        fake_distribution = torch.zeros_like(noise_logit)
+        fake_distribution = torch.ones_like(noise_logit) * -2
         
         indexs = y.unsqueeze(1) == torch.arange(self.num_classes+1).type_as(y).unsqueeze(0)
-        fake_distribution[indexs] = 0.5
+        fake_distribution[indexs] = 0.2
         fake_distribution[:,-1] = 1
         
         Oclass_loss = self.criterion(Ologit, y)
-        temper_loss = self.criterion(noise_logit, y) * 0.3
+        # temper_loss = self.criterion(noise_logit, y) * 0.3
         Gclass_loss = self.kldiv(noise_logit.softmax(-1), fake_distribution.softmax(-1)).mean()
         G_loss = Greal_loss + Gclass_loss
         
@@ -533,3 +553,4 @@ class FeatureGeneration(LightningModule):
 def requires_grad(model, flag=True):
     for p in model.parameters():
         p.requires_grad = flag
+        
