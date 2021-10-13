@@ -8,6 +8,7 @@ from LightingModule.NoiseGeneration import NoiseGeneration
 from LightingModule.CutMix import CutMix
 from LightingModule.Style import Style
 from LightingModule.FeatureGeneration import FeatureGeneration
+from LightingModule.FG import FG
 
 model_dict = {
     # 'vae': VAE,
@@ -20,4 +21,5 @@ model_dict = {
     'CutMix': CutMix,
     'Style': Style,
     'FeatureGeneration': FeatureGeneration,
+    'FG': FG
 }

@@ -225,7 +225,7 @@ class Discriminator(nn.Module):
         output = self.activation(output)
         return output
 
-class FeatureGeneration(LightningModule):
+class FG(LightningModule):
     def __init__(self,
                  lr: float = 0.01,
                  momentum: float = 0.9,
@@ -273,18 +273,6 @@ class FeatureGeneration(LightningModule):
         self.auroc1 = AUROC(pos_label=1)
         self.auroc2 = AUROC(pos_label=1)
         self.auroc3 = AUROC(pos_label=1)
-        
-        # a = [list(range(6)) for _ in range(6)]
-        # start = 6
-        # for i in range(6):
-        #     for j in range(i, 6):
-        #         if i == j:
-        #             a[i][j] = i
-        #         else:
-        #             a[i][j] = start
-        #             a[j][i] = start
-        #             start += 1
-        # self.YM = torch.tensor(a, dtype=torch.long).to(self.device)
         
         self.automatic_optimization = False
 
@@ -369,7 +357,7 @@ class FeatureGeneration(LightningModule):
         fake_distribution = torch.ones_like(noise_logit) * -2
         
         indexs = y.unsqueeze(1) == torch.arange(self.num_classes+1).type_as(y).unsqueeze(0)
-        fake_distribution[indexs] = 0.5
+        fake_distribution[indexs] = 0.7
         fake_distribution[:,-1] = 1
         
         Oclass_loss = self.criterion(Ologit, y)
@@ -396,6 +384,15 @@ class FeatureGeneration(LightningModule):
             
             'C/class': Oclass_loss, 
         }
+        
+        if self.trainer.is_last_batch:
+            
+            wandb.log({
+                'img': [wandb.Image(l1_clean[0][0].detach().cpu().numpy(), caption='clean'),
+                        wandb.Image(l1_noise[0][0].detach().cpu().numpy(), caption='noise'),
+                        wandb.Image(fake_feature[0][0].detach().cpu().numpy(), caption='fake'),]
+            })
+            
         
         self.log_dict(log_dict, on_step=True)
         
@@ -447,6 +444,27 @@ class FeatureGeneration(LightningModule):
     def on_validation_end(self) -> None:
         return super().on_validation_end()
     
+    
+    def optimizer_step(
+        self,
+        epoch,
+        batch_idx,
+        optimizer,
+        optimizer_idx,
+        optimizer_closure,
+        on_tpu = False,
+        using_native_amp = False,
+        using_lbfgs = False
+    ):
+        if optimizer_idx == 1 or optimizer_idx == 2:
+            if epoch > 30:
+                optimizer.step(closure=optimizer_closure)
+            else:
+                optimizer_closure()
+                
+        if optimizer_idx == 0:
+            optimizer.step(closure=optimizer_closure)
+    
     def configure_optimizers(self):
         # params = self.parameters()
         
@@ -454,7 +472,7 @@ class FeatureGeneration(LightningModule):
         #                              weight_decay=self.weight_decay)
         optimizer = torch.optim.Adam(self.model.parameters(),
                                  lr=self.lr, weight_decay=self.weight_decay)
-        opt_G = torch.optim.Adam(self.G.parameters(), lr=self.gan_lr, 
+        opt_G = torch.optim.Adam(self.G.parameters(), lr=0.001, 
                                  betas=(0.5, 0.999))
         opt_D = torch.optim.Adam(self.D.parameters(), lr=self.gan_lr,
                                  betas=(0.5, 0.999))
@@ -467,15 +485,15 @@ class FeatureGeneration(LightningModule):
         #     patience=10
         #     )
         
-        # COSINE ANNEALING
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100, eta_min=1e-6)
+        # # COSINE ANNEALING
+        # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100, eta_min=1e-6)
 
-        # # MULTI SETP LR
-        # scheduler = torch.optim.lr_scheduler.MultiStepLR(
-        #     optimizer,
-        #     milestones=[50],
-        #     gamma=0.1
-        # )
+        # MULTI SETP LR
+        scheduler = torch.optim.lr_scheduler.MultiStepLR(
+            optimizer,
+            milestones=[30],
+            gamma=0.1
+        )
         
         # return {
         #     'optimizer': [optimizer, opt_G, opt_D]
@@ -486,31 +504,13 @@ class FeatureGeneration(LightningModule):
         # }
         return [optimizer, opt_G, opt_D], [scheduler]
     
-    # learning rate warm-up
-    def optimizer_step(
-        self,
-        epoch,
-        batch_idx,
-        optimizer,
-        optimizer_idx,
-        optimizer_closure,
-        on_tpu=False,
-        using_native_amp=False,
-        using_lbfgs=False,):
-        # skip the first 500 steps
-        if self.trainer.global_step < 500:
-            lr_scale = min(1.0, float(self.trainer.global_step + 1) / 500.0)
-            for pg in optimizer.param_groups:
-                pg["lr"] = lr_scale * self.hparams.lr
 
-        # update params
-        optimizer.step(closure=optimizer_closure)
         
     def train_dataloader(self):
         
         if self.dataset == 'cifar10':
             dataset = SplitCifar10(self.data_dir, train=True,
-                                   transform=train_transform)
+                                   transform=train_transform, download=True)
             dataset.set_split(self.splits['known_classes'])
         
         return DataLoader(dataset, batch_size=self.batch_size, num_workers=self.num_workers)
@@ -518,7 +518,7 @@ class FeatureGeneration(LightningModule):
     def val_dataloader(self):
         if self.dataset == 'cifar10':
             dataset = OpenTestCifar10(self.data_dir, train=False,
-                                      transform=val_transform, split=self.splits['known_classes'])
+                                      transform=val_transform, split=self.splits['known_classes'], download=True)
             
         return DataLoader(dataset, batch_size=self.batch_size, num_workers=self.num_workers)
 
