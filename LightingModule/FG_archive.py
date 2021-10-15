@@ -71,7 +71,7 @@ class NoiseEncoder(nn.Module):
         
         x_n = self.bn(x_n)
         x_n = self.activation(x_n)
-        return x, x_n, newY
+        return x, x_n
         
     def forward_noise(self, x, newY):
         x = self.conv(x)
@@ -136,8 +136,8 @@ class classifier32(nn.Module):
         x = self.dr1(x)
         x = self.conv1(x)
         x = self.conv2(x)
-        clean, noise, newY = self.conv3.forward_clean(x, y, class_mask)
-        return clean, noise, newY
+        clean, noise = self.conv3.forward_clean(x, y, class_mask)
+        return clean, noise
     
     def block2(self, x):
         x = self.dr2(x)
@@ -153,8 +153,8 @@ class classifier32(nn.Module):
         x = self.dr2(x)
         x = self.conv4(x)
         x = self.conv5(x)
-        clean, noise, newY = self.conv6.forward_clean(x, y, class_mask)
-        return clean, noise, newY
+        clean, noise = self.conv6.forward_clean(x, y, class_mask)
+        return clean, noise
 
     def block3(self, x):
         x = self.dr3(x)
@@ -269,7 +269,7 @@ class FG(LightningModule):
         self.criterionD = nn.BCELoss()
 
         self.criterion = nn.CrossEntropyLoss()
-        self.kld = nn.KLDivLoss(reduction='batchmean')
+        self.kld = nn.KLDivLoss()
         self.auroc1 = AUROC(pos_label=1)
         self.auroc2 = AUROC(pos_label=1)
         self.auroc3 = AUROC(pos_label=1)
@@ -279,17 +279,17 @@ class FG(LightningModule):
     def on_train_start(self) -> None:
         wandb.save(self.log_dir+f"/{__file__.split('/')[-1]}")
         
-        print(f"load state_dict")
-        weight_path = f"./result/FG/s{self.class_split}.ckpt"
-        state_dict = torch.load(weight_path)['state_dict']
+        # print(f"load state_dict")
+        # weight_path = f"./result/checkpoints/s{self.class_split}.ckpt"
+        # state_dict = torch.load(weight_path)['state_dict']
         
         # self.load_state_dict(state_dict)
-        # self.model.load_state_dict(state_dict) 
-        model_state_dict = self.model.state_dict()
-        for name, param in state_dict.items():
-            n = name.replace('model.', '')
-            if n in model_state_dict.keys():
-                model_state_dict[n].copy_(param)
+    
+        # model_state_dict = self.model.state_dict()
+        # for name, param in state_dict.items():
+        #     n = name.replace('model.', '')
+        #     if n in model_state_dict.keys():
+        #         model_state_dict[n].copy_(param)
         
     
     def forward(self, x):
@@ -302,104 +302,102 @@ class FG(LightningModule):
         
     def training_step(self, batch, batch_idx):
         x, y = batch
-        # print(self.trainer.current_epoch)
+        
         batch_size = x.size(0)
+        gen_size = batch_size // 6
 
         opt_C, opt_G, opt_D = self.optimizers()
         
-        scheduler = self.lr_schedulers()
-        log_dict = dict()
+        # scheduler = self.lr_schedulers()
         
-        #########################################
-        # Train Model First
-        #########################################
-        
-        # if self.trainer.current_epoch < 30:
         requires_grad(self.model, True)
-        requires_grad(self.G, False)
-        requires_grad(self.D, False)
+        requires_grad(self.G, True)
         
-        out = self.model(x)  
-        class_loss = self.criterion(out, y)
+        l1_clean, l1_noise = self.model.block1_n(x, y)
+        # l2_clean, l2_noise = self.model.block2_n(l1, y)
+        fake_feature = self.G(l1_noise)
+        
+        ##################################################
+        # Train Discriminator
+        ##################################################
+        requires_grad(self.D, True)
+        requires_grad(self.G, False)
+        requires_grad(self.model, False)
 
+        Dreal = self.D(l1_clean.detach())
+        Dfake = self.D(fake_feature.detach())
+
+        Dreal_loss = self.criterionD(Dreal, torch.ones(Dreal.size()).to(self.device))
+        Dfake_loss = self.criterionD(Dfake, torch.zeros(Dfake.size()).to(self.device))
+        
+        D_loss = Dreal_loss + Dfake_loss
+        
+        opt_D.zero_grad()
+        self.manual_backward(D_loss)
+        opt_D.step()
+        
+        ##################################################
+        # Train Generator & Classifier
+        ##################################################
+        requires_grad(self.D, False)
+        requires_grad(self.G, True)
+        requires_grad(self.model, True)
+        
+        Greal = self.D(fake_feature)
+        
+        Greal_loss = self.criterionD(Greal, torch.ones(Greal.size()).to(self.device))
+        
+        l2_clean = self.model.block2(l1_clean)
+        Ologit = self.model.block3(l2_clean)
+        
+        Nlogit = self.model.block2(fake_feature)
+        noise_logit = self.model.block3(Nlogit)
+        
+        # Gclass_loss = self.criterion(noise_logit, torch.ones_like(y) * 6)
+        fake_distribution = torch.ones_like(noise_logit) * -2
+        
+        indexs = y.unsqueeze(1) == torch.arange(self.num_classes+1).type_as(y).unsqueeze(0)
+        fake_distribution[indexs] = 0.7
+        fake_distribution[:,-1] = 1
+        
+        Oclass_loss = self.criterion(Ologit, y)
+        # temper_loss = self.criterion(noise_logit, y) * 0.3
+        Gclass_loss = self.kldiv(noise_logit.softmax(-1), fake_distribution.softmax(-1)).mean()
+        G_loss = Greal_loss + Gclass_loss
+        
+        # G_loss = Gclass_loss 
+        C_loss = Oclass_loss
+        update = G_loss + C_loss
         opt_C.zero_grad()
-        self.manual_backward(class_loss)
+        opt_G.zero_grad()
+        self.manual_backward(update)
+        opt_G.step()
         opt_C.step()
-        Cacc = accuracy(out, y)[0]
-        log_dict['M/class'] = class_loss
-        log_dict['M/acc'] = Cacc.item()
+        
+        
+        log_dict = {
+            'G/classify': Gclass_loss,
+            'G/generation': Greal_loss,
+            
+            'D/real': Dreal_loss,
+            'D/fake': Dfake_loss,
+            
+            'C/class': Oclass_loss, 
+        }
         
         if self.trainer.is_last_batch:
-            scheduler.step()
+            
+            wandb.log({
+                'img': [wandb.Image(l1_clean[0][0].detach().cpu().numpy(), caption='clean'),
+                        wandb.Image(l1_noise[0][0].detach().cpu().numpy(), caption='noise'),
+                        wandb.Image(fake_feature[0][0].detach().cpu().numpy(), caption='fake'),]
+            })
+            
         
-        #########################################
-        # Update G, and D and Classifier
-        #########################################
-        
-        # else:
-        # #########################################
-        # # Update D
-        # #########################################
-        #     requires_grad(self.D, True)
-        #     requires_grad(self.G, True)
-        #     requires_grad(self.model, False)
-            
-        #     real_target = torch.ones(batch_size, dtype=torch.float).to(self.device)
-        #     fake_target = torch.zeros(batch_size, dtype=torch.float).to(self.device)
-            
-        #     real, l1_noise, newY = self.model.block1_n(x, y)
-        #     fake = self.G(l1_noise)
-            
-        #     Dreal = self.D(real.detach())
-        #     Dfake = self.D(fake.detach())
-            
-        #     Dreal_loss = self.criterionD(Dreal, real_target)
-        #     Dfake_loss = self.criterionD(Dfake, fake_target)
-        #     Dtotal_loss = Dreal_loss + Dfake_loss
-            
-        #     opt_D.zero_grad()
-        #     self.manual_backward(Dtotal_loss)
-        #     opt_D.step()
-            
-        #     log_dict['D/real'] = Dreal_loss
-        #     log_dict['D/fake'] = Dfake_loss
-            
-        # #########################################
-        # # Update G and classifier
-        # #########################################
-            
-        #     Greal = self.D(fake.detach())
-        #     Greal_loss = self.criterionD(Greal, real_target)
-            
-        #     l2_noise = self.model.block2(l1_noise)
-        #     logit_noise = self.model.block3(l2_noise)
-            
-        #     Gclass_loss = self.criterion(logit_noise, newY)
-            
-        #     Gtotal_loss = Greal_loss + Gclass_loss
-            
-        #     opt_G.zero_grad()
-        #     self.manual_backward(Gtotal_loss)
-        #     opt_G.step()
-            
-        #     f2 = self.model.block2(real)
-        #     logit = self.model.block3(f2)
-            
-        #     racc = accuracy(logit, y)[0]
-        #     gacc = accuracy(logit_noise, newY)[0]
-            
-            
-            
-        #     log_dict['G/gacc'] = gacc.item()
-        #     log_dict['G/racc'] = racc.item()
-        #     log_dict['G/real'] = Greal_loss
-        #     log_dict['G/class'] = Gclass_loss
-            
         self.log_dict(log_dict, on_step=True)
         
-        return None
-        
-       
+        loss = G_loss + D_loss + C_loss
+        return loss
 
     def validation_step(self, batch, batch_idx):
         x, train_y, y, known_idxs = batch
@@ -459,7 +457,6 @@ class FG(LightningModule):
         using_lbfgs = False
     ):
         if optimizer_idx == 1 or optimizer_idx == 2:
-            print(epoch)
             if epoch > 30:
                 optimizer.step(closure=optimizer_closure)
             else:
@@ -494,7 +491,7 @@ class FG(LightningModule):
         # MULTI SETP LR
         scheduler = torch.optim.lr_scheduler.MultiStepLR(
             optimizer,
-            milestones=[30, 60, 90],
+            milestones=[30],
             gamma=0.1
         )
         
