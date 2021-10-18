@@ -65,7 +65,7 @@ class NoiseEncoder(nn.Module):
         x = self.conv(x)
         self.cal_class_per_std(x, class_mask)
         noise = torch.normal(mean=0, std=self.buffer[newY]).type_as(x)
-        x_n = x + self.alpha * noise
+        x_n = x.detach() + self.alpha * noise
         x = self.bn(x)
         x = self.activation(x)
         
@@ -83,7 +83,7 @@ class NoiseEncoder(nn.Module):
     def cal_class_per_std(self, x, idxs):
         std = []
         for i in range(self.num_classes):
-            x_ = x[idxs[i]].clone().detach()
+            x_ = x[idxs[i]].detach().clone()
             
             std.append(x_.std(0))
         self.buffer = torch.stack(std)
@@ -117,9 +117,10 @@ class classifier32(nn.Module):
     def forward(self, x):
         l1 = self.block1(x)
         l2 = self.block2(l1)
-        y = self.block3(l2)
-        
-        return y
+        l3 = self.block3(l2)
+        logit = self.fc(l3)
+         
+        return logit
         
     def block1(self, x):
         x = self.dr1(x)
@@ -163,9 +164,7 @@ class classifier32(nn.Module):
 
         x = self.avgpool(x)
         x = x.view(x.shape[0], -1)
-
-        logit = self.fc(x)
-        return logit
+        return x
     
 class Generator(nn.Module):
     def __init__(self, in_channel, out_channel):
@@ -225,7 +224,7 @@ class Discriminator(nn.Module):
         output = self.activation(output)
         return output
 
-class FG(LightningModule):
+class FDG(LightningModule):
     def __init__(self,
                  lr: float = 0.01,
                  momentum: float = 0.9,
@@ -264,6 +263,8 @@ class FG(LightningModule):
         
         self.model = classifier32(num_classes=len(self.splits['known_classes']))
         # self.NewFC = nn.Linear(self.latent_size, self.num_classes * self.num_classes)
+        
+        
         self.G = Generator(128, 128)
         self.D = Discriminator(128, 128)
         self.criterionD = nn.BCELoss()
@@ -279,17 +280,17 @@ class FG(LightningModule):
     def on_train_start(self) -> None:
         wandb.save(self.log_dir+f"/{__file__.split('/')[-1]}")
         
-        # print(f"load state_dict")
-        # weight_path = f"./result/FG/s{self.class_split}.ckpt"
-        # state_dict = torch.load(weight_path)['state_dict']
+        print(f"load state_dict")
+        weight_path = f"./result/FG/s{self.class_split}.ckpt"
+        state_dict = torch.load(weight_path)['state_dict']
         
-        # # self.load_state_dict(state_dict)
-        # # self.model.load_state_dict(state_dict) 
-        # model_state_dict = self.model.state_dict()
-        # for name, param in state_dict.items():
-        #     n = name.replace('model.', '')
-        #     if n in model_state_dict.keys():
-        #         model_state_dict[n].copy_(param)
+        # self.load_state_dict(state_dict)
+        # self.model.load_state_dict(state_dict) 
+        model_state_dict = self.model.state_dict()
+        for name, param in state_dict.items():
+            n = name.replace('model.', '')
+            if n in model_state_dict.keys():
+                model_state_dict[n].copy_(param)
         
     
     def forward(self, x):
@@ -307,157 +308,51 @@ class FG(LightningModule):
 
         opt_C, opt_G, opt_D = self.optimizers()
         
-        scheduler = self.lr_schedulers()
+        # scheduler = self.lr_schedulers()
         log_dict = dict()
         
-        #########################################
-        # Train Model First
-        #########################################
+        # TRAIN MODEL & Discriminator
         
-        # # if self.trainer.current_epoch < 30:
-        # requires_grad(self.model, True)
-        # requires_grad(self.G, False)
-        # requires_grad(self.D, False)
+        l1, l1_noise, newY = self.model.block1_n(x, y)
+        fake = self.G(l1_noise)
+        l2 = self.model.block2(l1)
+        l2_fake = self.model.block2(fake)
+        l3 = self.model.block3(l2)
+        l3_fake = self.model.block3(l2_fake)
         
-        # out = self.model(x)  
-        # class_loss = self.criterion(out, y)
-
-        # opt_C.zero_grad()
-        # self.manual_backward(class_loss)
-        # opt_C.step()
-        # Cacc = accuracy(out, y)[0]
-        # log_dict['M/class'] = class_loss
-        # log_dict['M/acc'] = Cacc.item()
+        logit = self.model.fc(l3)
+        logit_fake = self.model.fc(l3_fake)
         
-        # if self.trainer.is_last_batch:
-        #     scheduler.step()
+        normal_class_loss = self.criterion(logit, y)
+        fake_class_loss = self.criterion(logit_fake, y)
         
-        #########################################
-        # Update G, and D and Classifier
-        #########################################
+        Mtotal_loss = normal_class_loss + fake_class_loss * 0.2
         
-        # else:
-        requires_grad(self.D, False)
-        requires_grad(self.G, True)
-        requires_grad(self.model, False)
-        
-        real, l1_noise, newY = self.model.block1_n(x, y)
-        fake = self.G(l1_noise.detach())
-        
-        #########################################
-        # Update D
-        #########################################
-        requires_grad(self.D, True)
-        requires_grad(self.G, False)
-        requires_grad(self.model, False)
-        
-        real_target = torch.ones(batch_size, dtype=torch.float).to(self.device)
-        fake_target = torch.zeros(batch_size, dtype=torch.float).to(self.device)
-        
-        
-        
-        # Dreal = self.D(real.detach())
-        # Dfake = self.D(fake.detach())
-        
-        # Dreal_loss = self.criterionD(Dreal, real_target)
-        # Dfake_loss = self.criterionD(Dfake, fake_target)
-        # Dtotal_loss = Dreal_loss + Dfake_loss
-        
-        # opt_D.zero_grad()
-        # self.manual_backward(Dtotal_loss)
-        # opt_D.step()
-        
-        # log_dict['D/real'] = Dreal_loss
-        # log_dict['D/fake'] = Dfake_loss
-        
-        #########################################
-        # Update G 
-        #########################################
-        requires_grad(self.D, False)
-        requires_grad(self.G, True)
-        requires_grad(self.model, False)
-        
-        # real, l1_noise, newY = self.model.block1_n(x, y)
-        # fake = self.G(l1_noise.detach())
-        # Greal = self.D(fake)
-        # Greal_loss = self.criterionD(Greal, real_target)
-        
-        l2_noise = self.model.block2(fake)
-        logit_noise = self.model.block3(l2_noise)
-        # TODO: 이 loss 를 다른 방식으로 바꿔보자 -> generation에 사용할 수 있는 다른 loss
-        # earth mover distance를 활용해보던지....  (residual 사용하면!?)
-        fake_distribution = torch.ones_like(logit_noise) * -2
-        
-        indexs = y.unsqueeze(1) == torch.arange(self.num_classes+1).type_as(y).unsqueeze(0)
-        fake_distribution[indexs] = 1
-        # indexs2 = newY.unsqueeze(1) == torch.arange(self.num_classes+1).type_as(y).unsqueeze(0)
-        # fake_distribution[indexs2] = 1
-        fake_distribution[:,-1] = 1
-        
-        # Gopen_loss = self.criterion(logit_noise, torch.ones_like(y) * 6)
-        Gopen_loss = self.kld(logit_noise.softmax(-1).log(), fake_distribution.softmax(-1))
-        
-        # Gtotal_loss = Greal_loss  + Gopen_loss
-        Gtotal_loss = Gopen_loss
-        
-        # log_dict['G/loss real'] = Greal_loss
-        log_dict['G/loss class'] = Gopen_loss
-        
-        opt_G.zero_grad()
-        opt_D.zero_grad()
-        self.manual_backward(Gtotal_loss)
-        opt_G.step()
-        
-        #########################################
-        # Update Classifier
-        #########################################
-        requires_grad(self.G, False)
-        requires_grad(self.model, True)
-        requires_grad(self.D, False)
-        
-        # real, l1_noise, newY = self.model.block1_n(x, y)
-        # fake = self.G(l1_noise.detach())
-        
-        f2 = self.model.block2(real)
-        logit = self.model.block3(f2)
-        Mclass_loss = self.criterion(logit, y)
-        
-        ff2 = self.model.block2(fake.detach())
-        flogit = self.model.block3(ff2)
-        # Mopen_loss = self.criterion(flogit, torch.ones_like(y) * 6)
-        fake_distribution = torch.ones_like(logit_noise) * -2
-        
-        indexs = y.unsqueeze(1) == torch.arange(self.num_classes+1).type_as(y).unsqueeze(0)
-        fake_distribution[indexs] = 1
-        # indexs2 = newY.unsqueeze(1) == torch.arange(self.num_classes+1).type_as(y).unsqueeze(0)
-        # fake_distribution[indexs2] = 1
-        fake_distribution[:,-1] = 2
-        Mopen_loss = self.kld(flogit.softmax(-1).log(), fake_distribution.softmax(-1))
-        
-        Mtotal_loss = Mclass_loss + Mopen_loss
-        # Mtotal_loss = Mclass_loss
-        
-        log_dict['M/loss class'] = Mclass_loss
-        log_dict['M/loss open'] = Mopen_loss
-        log_dict['M/acc'] = accuracy(logit, y)[0].item()
-        log_dict['M/oacc'] = accuracy(flogit, torch.ones_like(y) * 6)[0].item()
+        log_dict['M/normal class'] = normal_class_loss
+        log_dict['M/fake_loss'] = fake_class_loss
         
         opt_C.zero_grad()
         self.manual_backward(Mtotal_loss)
         opt_C.step()
+        
+        _, l1_noise, newY = self.model.block1_n(x, y)
+        fake = self.G(l1_noise)
+        l2_fake = self.model.block2(fake)
+        l3_fake = self.model.block3(fake)
+        logit_fake = self.model.fc(l3_fake)
+        
+        fake_loss = self.criterion(logit_fake, torch.ones_like(y) * 6)
+        
+        Gtotal_loss = fake_loss 
+        
+        log_dict['G/fake'] = fake_loss
+        # log_dict['G/origin'] = origin_loss
+        
+        opt_G.zero_grad()
+        self.manual_backward(Gtotal_loss)
+        opt_G.step()
             
         self.log_dict(log_dict, on_step=True)
-        
-        if self.trainer.is_last_batch:
-            
-            wandb.log({
-                'img': [wandb.Image(real[0][0].detach().cpu().numpy(), caption='clean'),
-                        wandb.Image(l1_noise[0][0].detach().cpu().numpy(), caption='noise'),
-                        wandb.Image(fake[0][0].detach().cpu().numpy(), caption='fake'),]
-            })
-            
-        # if self.trainer.is_last_batch:
-        #     scheduler.step()
         
         return None
         
@@ -469,14 +364,14 @@ class FG(LightningModule):
         out = self.model(x)
         
         pred = out.max(-1)[1]
-        # known = pred < 6
-        # unknown = pred >= 6
+        known = pred < 6
+        unknown = pred >= 6
         
-        # pred[unknown] = 6
-        train_y[~known_idxs] = 6
+        pred[known] = 1
+        pred[unknown] = 0
          
         # open_acc = pred.eq(known_idxs.long()).sum().item() / known_idxs.size(0)
-        f1_score = f1(pred, train_y, num_classes=7, average='macro')
+        f1_score = f1(pred, known_idxs.long(), num_classes=2, average='macro')
         
         loss = self.criterion(out[known_idxs], train_y[known_idxs])
         
@@ -489,7 +384,7 @@ class FG(LightningModule):
         top1k = accuracy(out[known_idxs], train_y[known_idxs], topk=(1,))[0]
         
         # unknown_acc = f1(pred[unknown], torch.zeros_like(pred[unknown]), num_classes=1, average='macro')
-        unknown_acc = pred[~known_idxs].eq(torch.ones_like(pred[~known_idxs]) * 6).sum().item() / len(pred[~known_idxs])
+        unknown_acc = pred[~known_idxs].eq(torch.zeros_like(pred[~known_idxs])).sum().item() / len(pred[~known_idxs])
         
         log_dict = {
             'val_loss': loss,
@@ -509,6 +404,26 @@ class FG(LightningModule):
         return super().on_validation_end()
     
     
+    def optimizer_step(
+        self,
+        epoch,
+        batch_idx,
+        optimizer,
+        optimizer_idx,
+        optimizer_closure,
+        on_tpu = False,
+        using_native_amp = False,
+        using_lbfgs = False
+    ):
+        if optimizer_idx == 1 or optimizer_idx == 2:
+            print(epoch)
+            if epoch > 30:
+                optimizer.step(closure=optimizer_closure)
+            else:
+                optimizer_closure()
+                
+        if optimizer_idx == 0:
+            optimizer.step(closure=optimizer_closure)
     
     def configure_optimizers(self):
         # params = self.parameters()
@@ -516,10 +431,10 @@ class FG(LightningModule):
         # optimizer = torch.optim.SGD(params, lr=self.lr, momentum=self.momentum, 
         #                              weight_decay=self.weight_decay)
         optimizer = torch.optim.Adam(self.model.parameters(),
-                                 lr=self.lr, weight_decay=self.weight_decay)
+                                 lr=0.0002, weight_decay=self.weight_decay)
         opt_G = torch.optim.Adam(self.G.parameters(), lr=0.001,
                                  betas=(0.5, 0.999))
-        opt_D = torch.optim.Adam(self.D.parameters(), lr=0.001,
+        opt_D = torch.optim.Adam(self.D.parameters(), lr=0.0002,
                                  betas=(0.5, 0.999))
         
         # # REDUCE LR ON PLATEAU
@@ -536,8 +451,8 @@ class FG(LightningModule):
         # MULTI SETP LR
         scheduler = torch.optim.lr_scheduler.MultiStepLR(
             optimizer,
-            milestones=[50],
-            gamma=0.5
+            milestones=[30, 60, 90],
+            gamma=0.1
         )
         
         # return {
@@ -591,10 +506,11 @@ class FG(LightningModule):
         
         parser.add_argument("--alpha", type=float, default=1)
         parser.add_argument("--beta", type=float, default=1.0)
-        parser.add_argument("--gan_lr", type=float, default=0.001)
+        parser.add_argument("--gan_lr", type=float, default=0.0001)
 
         return parser
     
 def requires_grad(model, flag=True):
     for p in model.parameters():
         p.requires_grad = flag
+        

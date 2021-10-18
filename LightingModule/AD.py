@@ -225,7 +225,7 @@ class Discriminator(nn.Module):
         output = self.activation(output)
         return output
 
-class FG(LightningModule):
+class AD(LightningModule):
     def __init__(self,
                  lr: float = 0.01,
                  momentum: float = 0.9,
@@ -355,106 +355,17 @@ class FG(LightningModule):
         fake_target = torch.zeros(batch_size, dtype=torch.float).to(self.device)
         
         
-        
-        # Dreal = self.D(real.detach())
-        # Dfake = self.D(fake.detach())
-        
-        # Dreal_loss = self.criterionD(Dreal, real_target)
-        # Dfake_loss = self.criterionD(Dfake, fake_target)
-        # Dtotal_loss = Dreal_loss + Dfake_loss
-        
-        # opt_D.zero_grad()
-        # self.manual_backward(Dtotal_loss)
-        # opt_D.step()
-        
-        # log_dict['D/real'] = Dreal_loss
-        # log_dict['D/fake'] = Dfake_loss
-        
-        #########################################
-        # Update G 
-        #########################################
-        requires_grad(self.D, False)
-        requires_grad(self.G, True)
-        requires_grad(self.model, False)
-        
-        # real, l1_noise, newY = self.model.block1_n(x, y)
-        # fake = self.G(l1_noise.detach())
-        # Greal = self.D(fake)
-        # Greal_loss = self.criterionD(Greal, real_target)
-        
-        l2_noise = self.model.block2(fake)
-        logit_noise = self.model.block3(l2_noise)
-        # TODO: 이 loss 를 다른 방식으로 바꿔보자 -> generation에 사용할 수 있는 다른 loss
-        # earth mover distance를 활용해보던지....  (residual 사용하면!?)
-        fake_distribution = torch.ones_like(logit_noise) * -2
-        
-        indexs = y.unsqueeze(1) == torch.arange(self.num_classes+1).type_as(y).unsqueeze(0)
-        fake_distribution[indexs] = 1
-        # indexs2 = newY.unsqueeze(1) == torch.arange(self.num_classes+1).type_as(y).unsqueeze(0)
-        # fake_distribution[indexs2] = 1
-        fake_distribution[:,-1] = 1
-        
-        # Gopen_loss = self.criterion(logit_noise, torch.ones_like(y) * 6)
-        Gopen_loss = self.kld(logit_noise.softmax(-1).log(), fake_distribution.softmax(-1))
-        
-        # Gtotal_loss = Greal_loss  + Gopen_loss
-        Gtotal_loss = Gopen_loss
-        
-        # log_dict['G/loss real'] = Greal_loss
-        log_dict['G/loss class'] = Gopen_loss
-        
-        opt_G.zero_grad()
-        opt_D.zero_grad()
-        self.manual_backward(Gtotal_loss)
-        opt_G.step()
-        
-        #########################################
-        # Update Classifier
-        #########################################
-        requires_grad(self.G, False)
-        requires_grad(self.model, True)
-        requires_grad(self.D, False)
-        
-        # real, l1_noise, newY = self.model.block1_n(x, y)
-        # fake = self.G(l1_noise.detach())
-        
-        f2 = self.model.block2(real)
-        logit = self.model.block3(f2)
-        Mclass_loss = self.criterion(logit, y)
-        
-        ff2 = self.model.block2(fake.detach())
-        flogit = self.model.block3(ff2)
-        # Mopen_loss = self.criterion(flogit, torch.ones_like(y) * 6)
-        fake_distribution = torch.ones_like(logit_noise) * -2
-        
-        indexs = y.unsqueeze(1) == torch.arange(self.num_classes+1).type_as(y).unsqueeze(0)
-        fake_distribution[indexs] = 1
-        # indexs2 = newY.unsqueeze(1) == torch.arange(self.num_classes+1).type_as(y).unsqueeze(0)
-        # fake_distribution[indexs2] = 1
-        fake_distribution[:,-1] = 2
-        Mopen_loss = self.kld(flogit.softmax(-1).log(), fake_distribution.softmax(-1))
-        
-        Mtotal_loss = Mclass_loss + Mopen_loss
-        # Mtotal_loss = Mclass_loss
-        
-        log_dict['M/loss class'] = Mclass_loss
-        log_dict['M/loss open'] = Mopen_loss
-        log_dict['M/acc'] = accuracy(logit, y)[0].item()
-        log_dict['M/oacc'] = accuracy(flogit, torch.ones_like(y) * 6)[0].item()
-        
-        opt_C.zero_grad()
-        self.manual_backward(Mtotal_loss)
-        opt_C.step()
+       
             
         self.log_dict(log_dict, on_step=True)
         
-        if self.trainer.is_last_batch:
+        # if self.trainer.is_last_batch:
             
-            wandb.log({
-                'img': [wandb.Image(real[0][0].detach().cpu().numpy(), caption='clean'),
-                        wandb.Image(l1_noise[0][0].detach().cpu().numpy(), caption='noise'),
-                        wandb.Image(fake[0][0].detach().cpu().numpy(), caption='fake'),]
-            })
+        #     wandb.log({
+        #         'img': [wandb.Image(real[0][0].detach().cpu().numpy(), caption='clean'),
+        #                 wandb.Image(l1_noise[0][0].detach().cpu().numpy(), caption='noise'),
+        #                 wandb.Image(fake[0][0].detach().cpu().numpy(), caption='fake'),]
+        #     })
             
         # if self.trainer.is_last_batch:
         #     scheduler.step()
