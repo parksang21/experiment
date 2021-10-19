@@ -97,6 +97,10 @@ class classifier32(nn.Module):
         self.conv1 = NoiseEncoder(3,     64,    3, 1, 1, bias=False, num_classes=num_classes)
         self.conv2 = NoiseEncoder(64,    64,    3, 1, 1, bias=False, num_classes=num_classes)
         self.conv3 = NoiseEncoder(64,   128,    3, 2, 1, bias=False, num_classes=num_classes)
+
+        self.conv1_ = NoiseEncoder(3,     64,    3, 1, 1, bias=False, num_classes=num_classes)
+        self.conv2_ = NoiseEncoder(64,    64,    3, 1, 1, bias=False, num_classes=num_classes)
+        self.conv3_ = NoiseEncoder(64,   128,    3, 2, 1, bias=False, num_classes=num_classes)
         
         self.conv4 = NoiseEncoder(128,  128,    3, 1, 1, bias=False, num_classes=num_classes)
         self.conv5 = NoiseEncoder(128,  128,    3, 1, 1, bias=False, num_classes=num_classes)
@@ -106,7 +110,7 @@ class classifier32(nn.Module):
         self.conv8 = NoiseEncoder(128,  128,    3, 1, 1, bias=False, num_classes=num_classes)
         self.conv9 = NoiseEncoder(128,  128,    3, 2, 1, bias=False, num_classes=num_classes)
         
-        self.fc = nn.Linear(128, num_classes + 1)
+        self.fc = nn.Linear(128, num_classes * 2)
         self.dr1 = nn.Dropout2d(0.2)
         self.dr2 = nn.Dropout2d(0.2)
         self.dr3 = nn.Dropout2d(0.2)
@@ -115,28 +119,32 @@ class classifier32(nn.Module):
         self.apply(weights_init)
         
     def forward(self, x):
-        l1 = self.block1(x)
-        l2 = self.block2(l1)
+        batch_size = x.size(0)
+        l1, l1_ = self.block1(x)
+        cat_l1 = torch.cat([l1, l1_], dim=0)
+        l2 = self.block2(cat_l1)
         y = self.block3(l2)
         
         return y
+    
+    def forward_val(self, x):
+        l1, _ = self.block1(x)
+        l2 = self.block2(l1)
+        l3 = self.block3(l2)
+        
+        return l3
         
     def block1(self, x):
         x = self.dr1(x)
+        x_ = self.dr1(x.clone())
         x = self.conv1(x)
+        x_ = self.conv1_(x_)
         x = self.conv2(x)
+        x_ = self.conv2_(x_)
         x = self.conv3(x)
+        x_ = self.conv3(x_)
         
-        return x
-    
-    def block1_n(self, x, y):
-        class_mask = y.unsqueeze(0) == torch.arange(
-            self.num_classes).type_as(y).unsqueeze(1)
-        x = self.dr1(x)
-        x = self.conv1(x)
-        x = self.conv2(x)
-        clean, noise, newY = self.conv3.forward_clean(x, y, class_mask)
-        return clean, noise, newY
+        return x, x_
     
     def block2(self, x):
         x = self.dr2(x)
@@ -146,15 +154,6 @@ class classifier32(nn.Module):
         
         return x
     
-    def block2_n(self, x, y):
-        class_mask = y.unsqueeze(0) == torch.arange(
-            self.num_classes).type_as(y).unsqueeze(1)
-        x = self.dr2(x)
-        x = self.conv4(x)
-        x = self.conv5(x)
-        clean, noise, newY = self.conv6.forward_clean(x, y, class_mask)
-        return clean, noise, newY
-
     def block3(self, x):
         x = self.dr3(x)
         x = self.conv7(x)
@@ -310,53 +309,22 @@ class AD(LightningModule):
         scheduler = self.lr_schedulers()
         log_dict = dict()
         
-        #########################################
-        # Train Model First
-        #########################################
-        
-        # # if self.trainer.current_epoch < 30:
-        # requires_grad(self.model, True)
-        # requires_grad(self.G, False)
-        # requires_grad(self.D, False)
-        
-        # out = self.model(x)  
-        # class_loss = self.criterion(out, y)
-
-        # opt_C.zero_grad()
-        # self.manual_backward(class_loss)
-        # opt_C.step()
-        # Cacc = accuracy(out, y)[0]
-        # log_dict['M/class'] = class_loss
-        # log_dict['M/acc'] = Cacc.item()
-        
-        # if self.trainer.is_last_batch:
-        #     scheduler.step()
-        
-        #########################################
-        # Update G, and D and Classifier
-        #########################################
-        
-        # else:
-        requires_grad(self.D, False)
-        requires_grad(self.G, True)
-        requires_grad(self.model, False)
-        
-        real, l1_noise, newY = self.model.block1_n(x, y)
-        fake = self.G(l1_noise.detach())
-        
-        #########################################
-        # Update D
-        #########################################
-        requires_grad(self.D, True)
-        requires_grad(self.G, False)
-        requires_grad(self.model, False)
-        
-        real_target = torch.ones(batch_size, dtype=torch.float).to(self.device)
-        fake_target = torch.zeros(batch_size, dtype=torch.float).to(self.device)
-        
-        
        
-            
+        logit = self.model(x)
+        
+        origin_loss = self.criterion(logit[:batch_size], y)
+        
+        open_loss = self.criterion(logit[batch_size:], y + 6)
+        
+        total_loss = origin_loss + open_loss
+        
+        log_dict['L/origin'] = origin_loss
+        log_dict['L/open'] = open_loss
+        
+        opt_C.zero_grad()
+        self.manual_backward(total_loss)
+        opt_C.step()
+         
         self.log_dict(log_dict, on_step=True)
         
         # if self.trainer.is_last_batch:
@@ -377,13 +345,12 @@ class AD(LightningModule):
     def validation_step(self, batch, batch_idx):
         x, train_y, y, known_idxs = batch
         
-        out = self.model(x)
+        out = self.model.forward_val(x)
         
         pred = out.max(-1)[1]
-        # known = pred < 6
-        # unknown = pred >= 6
+        unknown = pred >= 6
         
-        # pred[unknown] = 6
+        pred[unknown] = 6
         train_y[~known_idxs] = 6
          
         # open_acc = pred.eq(known_idxs.long()).sum().item() / known_idxs.size(0)
@@ -430,7 +397,7 @@ class AD(LightningModule):
                                  lr=self.lr, weight_decay=self.weight_decay)
         opt_G = torch.optim.Adam(self.G.parameters(), lr=0.001,
                                  betas=(0.5, 0.999))
-        opt_D = torch.optim.Adam(self.D.parameters(), lr=0.001,
+        opt_D = torch.optim.Adam(self.D.parameters(), lr=0.0001,
                                  betas=(0.5, 0.999))
         
         # # REDUCE LR ON PLATEAU

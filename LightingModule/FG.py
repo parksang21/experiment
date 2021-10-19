@@ -8,6 +8,9 @@ from torch import nn
 from torch.utils.data.dataloader import DataLoader
 from torchmetrics import AUROC
 from torchmetrics.functional import f1
+from torch.autograd import grad
+import torch.nn.functional as F
+
 import wandb
 
 from data.cifar10 import SplitCifar10, train_transform, val_transform, OpenTestCifar10
@@ -167,64 +170,92 @@ class classifier32(nn.Module):
         logit = self.fc(x)
         return logit
     
-class Generator(nn.Module):
-    def __init__(self, in_channel, out_channel):
-        super(self.__class__, self).__init__()
-        self.main = nn.Sequential(
-            nn.Conv2d(in_channel, out_channel * 2, 3, 1, 1, bias=False),
-            nn.BatchNorm2d(out_channel * 2),
-            nn.LeakyReLU(0.2, inplace=True),
-            
-            nn.Conv2d(out_channel * 2, out_channel * 2, 3, 1, 1, bias=False),
-            nn.BatchNorm2d(out_channel * 2),
-            nn.LeakyReLU(0.2, inplace=True),
-            
-            
-            nn.Conv2d(out_channel * 2, out_channel, 3, 1, 1, bias=False),
-            nn.BatchNorm2d(out_channel),
-            nn.LeakyReLU(0.2, inplace=True),
-            
-            nn.Conv2d(out_channel, out_channel, 3, 1, 1, bias=False),
-            nn.BatchNorm2d(out_channel),
-            nn.LeakyReLU(0.2, inplace=True),
-            )
-        
-    def forward(self, x):
-        output = self.main(x)
-        return output
-    
-class Discriminator(nn.Module):
-    def __init__(self, in_channel, out_channel):
-        super(self.__class__, self).__init__()
-        self.main = nn.Sequential(
-            nn.Conv2d(in_channel, out_channel, 3, 1, 1, bias=False),
-            nn.BatchNorm2d(out_channel),
-            nn.LeakyReLU(0.2),
-            
-            nn.Conv2d(in_channel, out_channel, 3, 1, 1, bias=False),
-            nn.BatchNorm2d(out_channel),
-            nn.LeakyReLU(0.2),
-            
-            nn.Conv2d(in_channel, out_channel // 2, 3, 1, 1, bias=False),
-            nn.BatchNorm2d(out_channel // 2),
-            nn.LeakyReLU(0.2),
-            
-            nn.Conv2d(in_channel // 2, out_channel // 2, 3, 2, 1, bias=False),
-            nn.BatchNorm2d(out_channel // 2),
-            nn.LeakyReLU(0.2),
-        )
-        self.avgpool = nn.AdaptiveAvgPool2d((1,1))
-        self.classifier = nn.Linear(out_channel // 2, 1)
-        self.activation = nn.Sigmoid()
-        
-    def forward(self, x):
-        output = self.main(x)
-        output = self.avgpool(output)
-        output = output.view(output.size(0), -1)
-        output = self.classifier(output).flatten()
-        output = self.activation(output)
-        return output
+    def block3_(self, x):
+        x = self.dr3(x)
+        x = self.conv7(x)
+        x = self.conv8(x)
+        x = self.conv9(x)
 
+        x = self.avgpool(x)
+        x = x.view(x.shape[0], -1)
+        return x
+    
+class ResidualBlock(nn.Module):
+    def __init__(self, inplanes, planes, kernel_size=3, stride=1, padding=1, downsample=None, groups=1):
+        super(ResidualBlock, self).__init__()
+
+        self.conv1 = nn.Sequential(
+            nn.Conv2d(inplanes, planes, kernel_size, stride=stride, padding=padding),
+            # nn.BatchNorm2d(planes),
+            nn.LeakyReLU(0.2)
+        )
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(planes, planes, kernel_size, padding=padding),
+            # nn.BatchNorm2d(planes),
+            nn.LeakyReLU(0.2)
+        )
+        self.proj = nn.Conv2d(inplanes, planes, 1) if stride==2 else None
+    
+    def forward(self, x):
+        identity = x
+        
+        y = self.conv1(x)
+        y = self.conv2(y)
+        
+        identity = identity if self.proj is None else self.proj(identity)
+        y = y + identity
+        return y
+    
+class Generator(nn.Module):
+    """
+        Convolutional Generator
+    """
+    def __init__(self, out_channel=1, n_filters=128, n_noise=512):
+        super(Generator, self).__init__()
+        # self.fc = nn.Linear(n_noise, 1024*4*4)
+        self.G = nn.Sequential(
+            ResidualBlock(128, 128, 3, 1, 1),
+            ResidualBlock(128, 128, 3, 1, 1),
+            ResidualBlock(128, 128, 3, 1, 1),
+#             ResidualBlock(128, 64),
+#             ResidualBlock(64, 64),
+        )
+        
+    def forward(self, x):
+        out = self.G(x)
+        return out
+
+class Discriminator(nn.Module):
+    """
+        Convolutional Discriminator
+    """
+    def __init__(self, in_channel=1):
+        super(Discriminator, self).__init__()
+        self.D = nn.Sequential(
+#             nn.Conv2d(in_channel, 64, 3, padding=1), # (N, 64, 64, 64)
+#             ResidualBlock(64, 128),
+#             nn.AvgPool2d(3, 2, padding=1), # (N, 128, 32, 32)
+#             ResidualBlock(128, 256),
+#             nn.AvgPool2d(3, 2, padding=1), # (N, 256, 16, 16)
+#             ResidualBlock(256, 512),
+#             nn.AvgPool2d(3, 2, padding=1), # (N, 512, 8, 8)
+#             ResidualBlock(512, 1024),
+#             nn.AvgPool2d(3, 2, padding=1) # (N, 1024, 4, 4)
+            ResidualBlock(128, 128, 3, 1, 1),
+            ResidualBlock(128, 128, 3, 1, 1),
+            nn.Conv2d(128, 128, 3, 2, 1),
+            # nn.BatchNorm2d(128),
+            nn.LeakyReLU(0.2),
+            nn.AdaptiveAvgPool2d((1,1))
+        )
+        self.fc = nn.Linear(128, 1) # (N, 1)
+        
+    def forward(self, x):
+        B = x.size(0)
+        h = self.D(x)
+        h = h.view(B, -1)
+        y = self.fc(h)
+        return y
 class FG(LightningModule):
     def __init__(self,
                  lr: float = 0.01,
@@ -240,6 +271,7 @@ class FG(LightningModule):
                  beta: float = 0.5,
                  gan_lr: float = 0.0002,
                  log_dir: str = './log',
+                 r1_gamma: float = 10.,
                  **kwargs):
         
         super(self.__class__, self).__init__()
@@ -257,6 +289,7 @@ class FG(LightningModule):
         self.alpha = alpha
         self.beta = beta
         self.gan_lr = gan_lr
+        self.r1_gamma = r1_gamma
         self.log_dir = log_dir
         
         self.splits = get_splits(dataset, class_split)
@@ -264,8 +297,8 @@ class FG(LightningModule):
         
         self.model = classifier32(num_classes=len(self.splits['known_classes']))
         # self.NewFC = nn.Linear(self.latent_size, self.num_classes * self.num_classes)
-        self.G = Generator(128, 128)
-        self.D = Discriminator(128, 128)
+        self.G = Generator()
+        self.D = Discriminator()
         self.criterionD = nn.BCELoss()
 
         self.criterion = nn.CrossEntropyLoss()
@@ -288,6 +321,8 @@ class FG(LightningModule):
         # model_state_dict = self.model.state_dict()
         # for name, param in state_dict.items():
         #     n = name.replace('model.', '')
+        #     if 'fc' in n:
+        #         continue
         #     if n in model_state_dict.keys():
         #         model_state_dict[n].copy_(param)
         
@@ -311,148 +346,111 @@ class FG(LightningModule):
         log_dict = dict()
         
         #########################################
-        # Train Model First
-        #########################################
-        
-        # # if self.trainer.current_epoch < 30:
-        # requires_grad(self.model, True)
-        # requires_grad(self.G, False)
-        # requires_grad(self.D, False)
-        
-        # out = self.model(x)  
-        # class_loss = self.criterion(out, y)
-
-        # opt_C.zero_grad()
-        # self.manual_backward(class_loss)
-        # opt_C.step()
-        # Cacc = accuracy(out, y)[0]
-        # log_dict['M/class'] = class_loss
-        # log_dict['M/acc'] = Cacc.item()
-        
-        # if self.trainer.is_last_batch:
-        #     scheduler.step()
-        
-        #########################################
-        # Update G, and D and Classifier
-        #########################################
-        
-        # else:
-        requires_grad(self.D, False)
-        requires_grad(self.G, True)
-        requires_grad(self.model, False)
-        
-        real, l1_noise, newY = self.model.block1_n(x, y)
-        fake = self.G(l1_noise.detach())
-        
-        #########################################
         # Update D
         #########################################
         requires_grad(self.D, True)
         requires_grad(self.G, False)
         requires_grad(self.model, False)
+        opt_C.zero_grad()
+        self.model.eval()
         
-        real_target = torch.ones(batch_size, dtype=torch.float).to(self.device)
-        fake_target = torch.zeros(batch_size, dtype=torch.float).to(self.device)
+        real, noise, newY = self.model.block1_n(x, y)
+        fake = self.G(noise.detach())
+                
+        # real.required_grad
+        D_input = real.detach()
+        D_input.requires_grad = True
+        Dreal = self.D(D_input)
+        Dreal_loss = self.r1loss(Dreal, True)
         
+        # update real
+        grad_real = grad(outputs=Dreal.sum(), inputs=D_input, create_graph=True)[0]
+        grad_penalty = (grad_real.view(grad_real.size(0), -1).norm(2, dim=1) ** 2).mean()
+        grad_penalty = 0.5 * self.r1_gamma * grad_penalty
+
+        Dfake = self.D(fake.detach())
+        Dfake_loss = self.r1loss(Dfake, False)
         
-        
-        # Dreal = self.D(real.detach())
-        # Dfake = self.D(fake.detach())
-        
-        # Dreal_loss = self.criterionD(Dreal, real_target)
-        # Dfake_loss = self.criterionD(Dfake, fake_target)
+        Dtotal_loss = Dreal_loss + grad_penalty + Dfake_loss
         # Dtotal_loss = Dreal_loss + Dfake_loss
         
-        # opt_D.zero_grad()
-        # self.manual_backward(Dtotal_loss)
-        # opt_D.step()
+        opt_D.zero_grad()
+        self.manual_backward(Dtotal_loss)
+        opt_D.step()
         
-        # log_dict['D/real'] = Dreal_loss
-        # log_dict['D/fake'] = Dfake_loss
+        log_dict['loss/discri real'] = Dreal_loss
+        log_dict['loss/discri fake'] = Dfake_loss
         
         #########################################
-        # Update G 
+        # Update G
         #########################################
         requires_grad(self.D, False)
         requires_grad(self.G, True)
         requires_grad(self.model, False)
+        opt_C.zero_grad()
         
-        # real, l1_noise, newY = self.model.block1_n(x, y)
-        # fake = self.G(l1_noise.detach())
-        # Greal = self.D(fake)
-        # Greal_loss = self.criterionD(Greal, real_target)
+        real, noise, newY = self.model.block1_n(x, y)
+        fake = self.G(noise.detach())
+
+        Greal = self.D(fake)
+        Greal_loss = self.r1loss(Greal, True)
+        f_l2 = self.model.block2(fake)
+        logit_f = self.model.block3(f_l2)
         
-        l2_noise = self.model.block2(fake)
-        logit_noise = self.model.block3(l2_noise)
-        # TODO: 이 loss 를 다른 방식으로 바꿔보자 -> generation에 사용할 수 있는 다른 loss
-        # earth mover distance를 활용해보던지....  (residual 사용하면!?)
-        fake_distribution = torch.ones_like(logit_noise) * -2
-        
+        fake_distribution = torch.ones_like(logit_f) * -2
         indexs = y.unsqueeze(1) == torch.arange(self.num_classes+1).type_as(y).unsqueeze(0)
-        fake_distribution[indexs] = 1
-        # indexs2 = newY.unsqueeze(1) == torch.arange(self.num_classes+1).type_as(y).unsqueeze(0)
-        # fake_distribution[indexs2] = 1
+        fake_distribution[indexs] = 0.5
         fake_distribution[:,-1] = 1
-        
-        # Gopen_loss = self.criterion(logit_noise, torch.ones_like(y) * 6)
-        Gopen_loss = self.kld(logit_noise.softmax(-1).log(), fake_distribution.softmax(-1))
-        
-        # Gtotal_loss = Greal_loss  + Gopen_loss
-        Gtotal_loss = Gopen_loss
-        
-        # log_dict['G/loss real'] = Greal_loss
-        log_dict['G/loss class'] = Gopen_loss
-        
+        Gclass_loss = self.kldiv(logit_f.softmax(-1), fake_distribution.softmax(-1)).mean()
+        G_loss = Greal_loss + Gclass_loss
+        # G_loss = Greal_loss
         opt_G.zero_grad()
-        opt_D.zero_grad()
-        self.manual_backward(Gtotal_loss)
+        self.manual_backward(G_loss)
         opt_G.step()
         
-        #########################################
-        # Update Classifier
-        #########################################
+        
+        #########################################$
+        # update classifier
+        #########################################$
+        self.model.train()
+        
         requires_grad(self.G, False)
-        requires_grad(self.model, True)
         requires_grad(self.D, False)
+        requires_grad(self.model, True)
+        real, noise, newY = self.model.block1_n(x, y)
+        fake = self.G(noise)
+        l2 = self.model.block2(real)
+        logit_r = self.model.block3(l2)
+
+        l2_f = self.model.block2(fake.detach())
+        logit_f = self.model.block3(l2_f)
         
-        # real, l1_noise, newY = self.model.block1_n(x, y)
-        # fake = self.G(l1_noise.detach())
-        
-        f2 = self.model.block2(real)
-        logit = self.model.block3(f2)
-        Mclass_loss = self.criterion(logit, y)
-        
-        ff2 = self.model.block2(fake.detach())
-        flogit = self.model.block3(ff2)
-        # Mopen_loss = self.criterion(flogit, torch.ones_like(y) * 6)
-        fake_distribution = torch.ones_like(logit_noise) * -2
-        
+        Mclass_loss = self.criterion(logit_r, y)
+        # Mopen_loss = self.criterion(logit_f, torch.ones_like(y) * 6)
+        fake_distribution = torch.ones_like(logit_f) * -2
         indexs = y.unsqueeze(1) == torch.arange(self.num_classes+1).type_as(y).unsqueeze(0)
-        fake_distribution[indexs] = 1
-        # indexs2 = newY.unsqueeze(1) == torch.arange(self.num_classes+1).type_as(y).unsqueeze(0)
-        # fake_distribution[indexs2] = 1
-        fake_distribution[:,-1] = 2
-        Mopen_loss = self.kld(flogit.softmax(-1).log(), fake_distribution.softmax(-1))
-        
-        Mtotal_loss = Mclass_loss + Mopen_loss
-        # Mtotal_loss = Mclass_loss
-        
-        log_dict['M/loss class'] = Mclass_loss
-        log_dict['M/loss open'] = Mopen_loss
-        log_dict['M/acc'] = accuracy(logit, y)[0].item()
-        log_dict['M/oacc'] = accuracy(flogit, torch.ones_like(y) * 6)[0].item()
-        
+        fake_distribution[indexs] = 0.5
+        fake_distribution[:,-1] = 1
+        Mopen_loss = self.kldiv(logit_f.softmax(-1), fake_distribution.softmax(-1)).mean()
+        M_loss = Mclass_loss + Mopen_loss * 0.5
         opt_C.zero_grad()
-        self.manual_backward(Mtotal_loss)
+        self.manual_backward(M_loss)
         opt_C.step()
-            
+        
+        
+        log_dict['loss/model known'] = Mclass_loss
+        log_dict['loss/G unkonwn'] = Gclass_loss
+        log_dict['loss/G real'] = Greal_loss
+        log_dict['acc/train closed'] = accuracy(logit_r, y)[0].item()
+        log_dict['acc/train open'] = accuracy(logit_f, torch.ones_like(y) * 6)[0].item()
+        
         self.log_dict(log_dict, on_step=True)
         
         if self.trainer.is_last_batch:
-            
+
             wandb.log({
                 'img': [wandb.Image(real[0][0].detach().cpu().numpy(), caption='clean'),
-                        wandb.Image(l1_noise[0][0].detach().cpu().numpy(), caption='noise'),
+                        wandb.Image(noise[0][0].detach().cpu().numpy(), caption='noise'),
                         wandb.Image(fake[0][0].detach().cpu().numpy(), caption='fake'),]
             })
             
@@ -470,9 +468,9 @@ class FG(LightningModule):
         
         pred = out.max(-1)[1]
         # known = pred < 6
-        # unknown = pred >= 6
+        unknown = pred >= 6
         
-        # pred[unknown] = 6
+        pred[unknown] = 6
         train_y[~known_idxs] = 6
          
         # open_acc = pred.eq(known_idxs.long()).sum().item() / known_idxs.size(0)
@@ -492,12 +490,12 @@ class FG(LightningModule):
         unknown_acc = pred[~known_idxs].eq(torch.ones_like(pred[~known_idxs]) * 6).sum().item() / len(pred[~known_idxs])
         
         log_dict = {
-            'val_loss': loss,
-            'val_acc': top1k,
-            'softmax': soft_max_auroc,
-            'logit': logit_auroc,
-            'open f1': f1_score,
-            'unknown acc': unknown_acc
+            'loss/val closed': loss,
+            'acc/val closed': top1k,
+            'acc/val softmax': soft_max_auroc,
+            'acc/val logit': logit_auroc,
+            'acc/f1': f1_score,
+            'acc/unknown': unknown_acc
             # 'total_softmax': total_softmax_auroc,
             }
         
@@ -515,12 +513,18 @@ class FG(LightningModule):
         
         # optimizer = torch.optim.SGD(params, lr=self.lr, momentum=self.momentum, 
         #                              weight_decay=self.weight_decay)
+        
+        # C_params = list(self.model.parameters()) + list(self.G.parameters())
         optimizer = torch.optim.Adam(self.model.parameters(),
                                  lr=self.lr, weight_decay=self.weight_decay)
-        opt_G = torch.optim.Adam(self.G.parameters(), lr=0.001,
-                                 betas=(0.5, 0.999))
-        opt_D = torch.optim.Adam(self.D.parameters(), lr=0.001,
-                                 betas=(0.5, 0.999))
+        
+        # opt_G = torch.optim.Adam(self.G.parameters(), lr=0.001,
+        #                          betas=(0.5, 0.999))
+        # opt_D = torch.optim.Adam(self.D.parameters(), lr=0.0001,
+        #                          betas=(0.5, 0.999))
+        opt_G = torch.optim.RMSprop(self.G.parameters(), lr=1e-4, alpha=0.99)
+        opt_D = torch.optim.RMSprop(self.D.parameters(), lr=1e-4, alpha=0.99)
+        
         
         # # REDUCE LR ON PLATEAU
         # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -536,8 +540,8 @@ class FG(LightningModule):
         # MULTI SETP LR
         scheduler = torch.optim.lr_scheduler.MultiStepLR(
             optimizer,
-            milestones=[50],
-            gamma=0.5
+            milestones=[30, 60, 90],
+            gamma=0.1
         )
         
         # return {
@@ -570,6 +574,11 @@ class FG(LightningModule):
         
     def kldiv(self, P, Q):
         return (P * (P / Q).log()).sum(-1)
+    
+    def r1loss(self, inputs, label=None):
+        # non-saturating loss with R1 regularization
+        l = -1 if label else 1
+        return F.softplus(l*inputs).mean()
        
     def validation_epoch_end(self, outputs) -> None:
         
@@ -589,7 +598,7 @@ class FG(LightningModule):
         parser.add_argument("--data_dir", type=str, default="/datasets")
         parser.add_argument("--class_split", type=int, default=0)
         
-        parser.add_argument("--alpha", type=float, default=1)
+        parser.add_argument("--alpha", type=float, default=0.5)
         parser.add_argument("--beta", type=float, default=1.0)
         parser.add_argument("--gan_lr", type=float, default=0.001)
 
