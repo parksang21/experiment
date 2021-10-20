@@ -80,7 +80,7 @@ def main():
     trainer = Trainer(gpus=1, accelerator="dp", 
                       logger=wandb_logger,
                       callbacks=[checkpoint_callback, lr_monitor],
-                      max_epochs=100,
+                      max_epochs=300,
                     #   precision=16,
                       auto_lr_find=False,
                       )

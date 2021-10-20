@@ -312,19 +312,19 @@ class FG(LightningModule):
     def on_train_start(self) -> None:
         wandb.save(self.log_dir+f"/{__file__.split('/')[-1]}")
         
-        # print(f"load state_dict")
-        # weight_path = f"./result/FG/s{self.class_split}.ckpt"
-        # state_dict = torch.load(weight_path)['state_dict']
+        print(f"load state_dict")
+        weight_path = f"./result/FG/s{self.class_split}.ckpt"
+        state_dict = torch.load(weight_path)['state_dict']
         
-        # # self.load_state_dict(state_dict)
-        # # self.model.load_state_dict(state_dict) 
-        # model_state_dict = self.model.state_dict()
-        # for name, param in state_dict.items():
-        #     n = name.replace('model.', '')
-        #     if 'fc' in n:
-        #         continue
-        #     if n in model_state_dict.keys():
-        #         model_state_dict[n].copy_(param)
+        # self.load_state_dict(state_dict)
+        # self.model.load_state_dict(state_dict) 
+        model_state_dict = self.model.state_dict()
+        for name, param in state_dict.items():
+            n = name.replace('model.', '')
+            if 'fc' in n:
+                continue
+            if n in model_state_dict.keys():
+                model_state_dict[n].copy_(param)
         
     
     def forward(self, x):
@@ -432,7 +432,7 @@ class FG(LightningModule):
         fake_distribution[indexs] = 0.5
         fake_distribution[:,-1] = 1
         Mopen_loss = self.kldiv(logit_f.softmax(-1), fake_distribution.softmax(-1)).mean()
-        M_loss = Mclass_loss + Mopen_loss * 0.5
+        M_loss = Mclass_loss + Mopen_loss
         opt_C.zero_grad()
         self.manual_backward(M_loss)
         opt_C.step()
