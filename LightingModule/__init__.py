@@ -11,6 +11,9 @@ from LightingModule.FeatureGeneration import FeatureGeneration
 from LightingModule.FG import FG
 from LightingModule.FDG import FDG
 from LightingModule.AD import AD
+from LightingModule.Classify_Only import Classify_Only
+from LightingModule.FGcombined import FGcombined
+from LightingModule.FGCgan import FGCgan
 
 model_dict = {
     # 'vae': VAE,
@@ -26,4 +29,7 @@ model_dict = {
     'FG': FG,
     'FDG': FDG,
     'AD': AD,
+    'Classify_Only': Classify_Only,
+    'FGcombined': FGcombined,
+    'FGCgan': FGCgan
 }

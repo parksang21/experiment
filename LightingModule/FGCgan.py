@@ -251,7 +251,7 @@ class Discriminator(nn.Module):
         h = h.view(B, -1)
         y = self.fc(h)
         return y
-class FG(LightningModule):
+class FGCgan(LightningModule):
     def __init__(self,
                  lr: float = 0.01,
                  momentum: float = 0.9,
@@ -298,13 +298,14 @@ class FG(LightningModule):
         self.num_classes = len(self.splits['known_classes'])
         
         self.model = classifier32(num_classes=len(self.splits['known_classes']))
-        self.NewFC = nn.Sequential(
-            nn.Linear(self.latent_size, self.latent_size //2 ),
-            nn.Linear(int(self.latent_size // 2), self.latent_size),
-            nn.Linear(self.latent_size, 1),
-            nn.Sigmoid()
-        )
+        # self.NewFC = nn.Sequential(
+        #     nn.Linear(self.latent_size, self.latent_size //2 ),
+        #     nn.Linear(int(self.latent_size // 2), self.latent_size),
+        #     nn.Linear(self.latent_size, 1),
+        #     nn.Sigmoid()
+        # )
         # self.NewFC = nn.Linear(self.latent_size, 1)
+        self.var = nn.Parameter(torch.randn(self.latent_size, 8, 8))
         self.G = Generator()
         self.D = Discriminator()
         self.criterionD = nn.BCELoss()
@@ -369,10 +370,17 @@ class FG(LightningModule):
         opt_C.zero_grad()
         self.model.eval()
         
-        x = self.model.block1(x)
-        real, noise, newY = self.model.block2_n(x, y)
+        l1 = self.model.block1(x)
+        # l2 = self.model.block2(l1)
         
-        fake = self.G(noise.detach())
+        class_mask = y.unsqueeze(0) == torch.arange(self.num_classes).type_as(y).unsqueeze(1)
+        var = []
+        for i in range(self.num_classes):
+            var.append(l1[class_mask[i]].std(0).detach())
+        var = torch.stack(var)
+        l_code = torch.normal(mean=0, std=var[y]).type_as(l1)
+        real = l1.detach() + l_code.detach()
+        
                 
         # real.required_grad
         D_input = real.detach()
@@ -384,8 +392,12 @@ class FG(LightningModule):
         grad_real = grad(outputs=Dreal.sum(), inputs=D_input, create_graph=True)[0]
         grad_penalty = (grad_real.view(grad_real.size(0), -1).norm(2, dim=1) ** 2).mean()
         grad_penalty = 0.5 * self.r1_gamma * grad_penalty
-
-        Dfake = self.D(fake.detach())
+        
+        newY = cal_index(self.num_classes, y)
+        noise = torch.normal(mean=0, std=var[newY]).type_as(l1)
+        g_input = l1.detach() + noise.detach()
+        fake = self.G(g_input)
+        Dfake = self.D(fake + noise)
         Dfake_loss = self.r1loss(Dfake, False)
         
         Dtotal_loss = Dreal_loss + grad_penalty + Dfake_loss
@@ -406,31 +418,13 @@ class FG(LightningModule):
         requires_grad(self.model, False)
         opt_C.zero_grad()
         
-        # real, noise, newY = self.model.block1_n(x, y)
-        x = self.model.block1(x)
-        real, noise, newY = self.model.block2_n(x, y)
-        fake = self.G(noise.detach())
-        Greal = self.D(fake)
+    
+        # noise = torch.normal(mean=0, std=var[newY]).type_as(l2)
+
+        fake = self.G(l1.detach() + noise)
+        Greal = self.D(fake + noise)
         Greal_loss = self.r1loss(Greal, True)
-        # f_l2 = self.model.block2(fake)
-        logit_f = self.model.block3(fake)
-        
-        # dist_loss = torch.dist(real.detach(), fake)
-        # dist_loss = ((real.detach().flatten(-2) - fake.flatten(-2)) ** 2).sqrt().sum().mean()
-        # dist_loss = self.mse(fake, real.detach())
-        
-        
-        # fake_distribution = torch.ones_like(logit_f) * -2
-        # indexs = y.unsqueeze(1) == torch.arange(self.num_classes).type_as(y).unsqueeze(0)
-        # indexs2 = newY.unsqueeze(1) == torch.arange(self.num_classes).type_as(y).unsqueeze(0)
-        # fake_distribution[indexs] = 5
-        # fake_distribution[indexs2] = 4
-        # # # fake_distribution[:,-1] = 1
-        # Gclass_loss = self.kldiv(logit_f.softmax(-1), fake_distribution.softmax(-1)).mean()
-        # Gclass_loss =self.criterion(logit_f, y)
-        # G_loss = Greal_loss + Gclass_loss
-        # G_loss = Greal_loss + Gclass_loss
-        # G_loss = Greal_loss + Gclass_loss
+
         G_loss = Greal_loss
         opt_G.zero_grad()
         self.manual_backward(G_loss)
@@ -445,15 +439,19 @@ class FG(LightningModule):
         requires_grad(self.G, False)
         requires_grad(self.D, False)
         requires_grad(self.model, True)
-        real, noise, newY = self.model.block1_n(x, y)
-        fake = self.G(noise.detach())
-        l2 = self.model.block2(real)
-        emb_r = self.model.block3_(l2)
-        logit = self.model.fc(emb_r)
-
-        l2_f = self.model.block2(fake.detach())
-        emb = self.model.block3_(l2_f)
-        logit_f = self.model.fc(emb)
+        l1 = self.model.block1(x)
+        l2 = self.model.block2(l1)
+        logit = self.model.block3(l2)
+        # class_mask = y.unsqueeze(0) == torch.arange(self.num_classes).type_as(y).unsqueeze(1)
+        var = []
+        for i in range(self.num_classes):
+            var.append(l1[class_mask[i]].std(0))
+        var = torch.stack(var)
+        newY = cal_index(self.num_classes, y)
+        noise = l1 + torch.normal(mean=0, std=var[newY])
+        fake = self.G(noise)
+        fake_l2 = self.model.block2(fake.detach())
+        logit_f = self.model.block3(fake_l2)
         
         Mclass_loss = self.criterion(logit, y)
         
@@ -464,7 +462,7 @@ class FG(LightningModule):
         # fake_distribution[indexs2] = 5
 
         # Mopen_loss = self.kldiv(logit_f.softmax(-1), fake_distribution.softmax(-1)).mean()
-        Mopen_loss = self.label_smoothing(logit_f, y)
+        Mopen_loss = self.label_smoothing(logit_f, newY)
         # M_loss = Mclass_loss + Mopen_loss + Mclosed_loss
         M_loss = Mclass_loss + Mopen_loss
         opt_C.zero_grad()
@@ -473,14 +471,13 @@ class FG(LightningModule):
         
         
         log_dict['loss/model known'] = Mclass_loss
-        # log_dict['loss/model open'] = Mopen_loss
+        log_dict['loss/model open'] = Mopen_loss
         # log_dict['loss/model closed'] = Mclosed_loss
-        log_dict['loss/G unkonwn'] = Gclass_loss
+        # log_dict['loss/G unkonwn'] = Gclass_loss
         log_dict['loss/G real'] = Greal_loss
-        log_dict['loss/G dist'] = dist_loss
+        # log_dict['loss/G dist'] = dist_loss
         log_dict['acc/train closed'] = accuracy(logit, y)[0].item()
-        # log_dict['acc/train open'] = accuracy(logit_f, 
-        #                                       torch.ones_like(y) * self.num_classes)[0].item()
+        log_dict['acc/train open'] = accuracy(logit_f, y)[0].item()
         
         self.log_dict(log_dict, on_step=True)
         
@@ -616,8 +613,8 @@ class FG(LightningModule):
         # optimizer = torch.optim.SGD(params, lr=self.lr, momentum=self.momentum, 
         #                              weight_decay=self.weight_decay)
         
-        C_params = list(self.model.parameters()) + list(self.NewFC.parameters())
-        optimizer = torch.optim.Adam(C_params,
+        # C_params = list(self.model.parameters()) + list(self.NewFC.parameters())
+        optimizer = torch.optim.Adam(self.model.parameters(),
                                  lr=self.lr, weight_decay=self.weight_decay)
         
         # opt_G = torch.optim.Adam(self.G.parameters(), lr=0.001,

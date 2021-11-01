@@ -15,17 +15,22 @@ import shutil
 from LightingModule import model_dict
 
 MODEL_CHOICES = list(model_dict.keys())
-
+DATA_CHOISES = [
+   "cifar10", "cifar+10",
+    "cifar+50", "mnist" 
+]
 
 def main():
     
     
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", default="cifar10", type=str, 
-                        choices=["cifar10", "stl10", "imagenet"])
+                        choices=DATA_CHOISES)
     parser.add_argument("--model", choices=MODEL_CHOICES)
     parser.add_argument("--project", type=str, default="default")
     parser.add_argument("--seed", type=int, default=187560756)
+    parser.add_argument("--epoch", type=int, default=100)
+    parser.add_argument("--splits", type=str, default="zero")
     
     
     script_args, _ = parser.parse_known_args()
@@ -77,10 +82,10 @@ def main():
     # trainer = Trainer.from_argparse_args(args, logger=wandb_logger, 
     #                                      callbacks=[checkpoint_callback, lr_monitor])
 
-    trainer = Trainer(gpus=1, accelerator="dp", 
+    trainer = Trainer(gpus=1, 
                       logger=wandb_logger,
                       callbacks=[checkpoint_callback, lr_monitor],
-                      max_epochs=300,
+                      max_epochs=args.epoch,
                     #   precision=16,
                       auto_lr_find=False,
                       )
@@ -88,7 +93,6 @@ def main():
     # wandb_logger.watch(model)
     wandb_logger.log_hyperparams(args)
     trainer.tune(model)
-    
     trainer.fit(model)
     
     return model

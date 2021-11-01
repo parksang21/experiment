@@ -1,5 +1,6 @@
 from logging import log
 from sys import setdlopenflags
+from numpy.lib.function_base import average
 from pytorch_lightning import LightningModule
 from pytorch_lightning.trainer.supporters import CombinedLoader
 from argparse import ArgumentParser
@@ -59,7 +60,7 @@ class NoiseEncoder(nn.Module):
         self.bn_noise = nn.BatchNorm2d(channel_out)
         self.activation = nn.LeakyReLU(0.2)
         self.num_classes = num_classes
-        self.buffer = None
+        self.register_buffer('buffer', None)
         self.alpha = alpha
         
     def forward(self, x):
@@ -114,7 +115,7 @@ class classifier32(nn.Module):
         self.conv8 = NoiseEncoder(128,  128,    3, 1, 1, bias=False, num_classes=num_classes)
         self.conv9 = NoiseEncoder(128,  128,    3, 2, 1, bias=False, num_classes=num_classes)
         
-        self.fc = nn.Linear(128, num_classes)
+        self.fc = nn.Linear(128, num_classes + 1)
         self.dr1 = nn.Dropout2d(0.2)
         self.dr2 = nn.Dropout2d(0.2)
         self.dr3 = nn.Dropout2d(0.2)
@@ -298,13 +299,7 @@ class FG(LightningModule):
         self.num_classes = len(self.splits['known_classes'])
         
         self.model = classifier32(num_classes=len(self.splits['known_classes']))
-        self.NewFC = nn.Sequential(
-            nn.Linear(self.latent_size, self.latent_size //2 ),
-            nn.Linear(int(self.latent_size // 2), self.latent_size),
-            nn.Linear(self.latent_size, 1),
-            nn.Sigmoid()
-        )
-        # self.NewFC = nn.Linear(self.latent_size, 1)
+        # self.NewFC = nn.Linear(self.latent_size, self.num_classes * self.num_classes)
         self.G = Generator()
         self.D = Discriminator()
         self.criterionD = nn.BCELoss()
@@ -314,33 +309,32 @@ class FG(LightningModule):
         self.auroc1 = AUROC(pos_label=1)
         self.auroc2 = AUROC(pos_label=1)
         self.auroc3 = AUROC(pos_label=1)
-        self.mse = nn.MSELoss(reduction='mean')
-        self.label_smoothing = LabelSmoothingLoss(self.num_classes, smoothing=0.3)
+        
         self.automatic_optimization = False
 
     def on_train_start(self) -> None:
         wandb.save(self.log_dir+f"/{__file__.split('/')[-1]}")
         
-        # print(f"load state_dict")
-        # if 'cifar+' in self.dataset:
-        #     dataset = 'cifar+10'
-        #     split_case = 'zero'
-        # else:
-        #     dataset = self.dataset
-        #     split_case = self.split_case
-        # weight_path = f"./result/{dataset}/{split_case}_s{self.class_split}.ckpt"
-        # state_dict = torch.load(weight_path)['state_dict']
+        print(f"load state_dict")
+        if 'cifar+' in self.dataset:
+            dataset = 'cifar+10'
+            split_case = 'zero'
+        else:
+            dataset = self.dataset
+            split_case = self.class_split
+        weight_path = f"./result/{dataset}/{split_case}_s{self.class_split}.ckpt"
+        state_dict = torch.load(weight_path)['state_dict']
         
-        # # self.load_state_dict(state_dict)
-        # # self.model.load_state_dict(state_dict) 
-        # model_state_dict = self.model.state_dict()
-        # for name, param in state_dict.items():
-        #     if 'model' in name:
-        #         n = name.replace('model.', '')
-        #         if 'fc' in n:
-        #             continue
-        #         if n in model_state_dict.keys():
-        #             model_state_dict[n].copy_(param)
+        # self.load_state_dict(state_dict)
+        # self.model.load_state_dict(state_dict) 
+        model_state_dict = self.model.state_dict()
+        for name, param in state_dict.items():
+            if 'model' in name:
+                n = name.replace('model.', '')
+                if 'fc' in n:
+                    continue
+                if n in model_state_dict.keys():
+                    model_state_dict[n].copy_(param)
         
     
     def forward(self, x):
@@ -360,18 +354,16 @@ class FG(LightningModule):
         scheduler = self.lr_schedulers()
         log_dict = dict()
         
-        ########################################
+        #########################################
         # Update D
-        ########################################
+        #########################################
         requires_grad(self.D, True)
         requires_grad(self.G, True)
         requires_grad(self.model, True)
         opt_C.zero_grad()
         self.model.eval()
         
-        x = self.model.block1(x)
-        real, noise, newY = self.model.block2_n(x, y)
-        
+        real, noise, newY = self.model.block1_n(x, y)
         fake = self.G(noise.detach())
                 
         # real.required_grad
@@ -407,37 +399,28 @@ class FG(LightningModule):
         opt_C.zero_grad()
         
         # real, noise, newY = self.model.block1_n(x, y)
-        x = self.model.block1(x)
-        real, noise, newY = self.model.block2_n(x, y)
-        fake = self.G(noise.detach())
+        # fake = self.G(noise.detach())
+
         Greal = self.D(fake)
         Greal_loss = self.r1loss(Greal, True)
-        # f_l2 = self.model.block2(fake)
-        logit_f = self.model.block3(fake)
+        f_l2 = self.model.block2(fake)
+        logit_f = self.model.block3(f_l2)
         
-        # dist_loss = torch.dist(real.detach(), fake)
-        # dist_loss = ((real.detach().flatten(-2) - fake.flatten(-2)) ** 2).sqrt().sum().mean()
-        # dist_loss = self.mse(fake, real.detach())
-        
-        
-        # fake_distribution = torch.ones_like(logit_f) * -2
-        # indexs = y.unsqueeze(1) == torch.arange(self.num_classes).type_as(y).unsqueeze(0)
-        # indexs2 = newY.unsqueeze(1) == torch.arange(self.num_classes).type_as(y).unsqueeze(0)
-        # fake_distribution[indexs] = 5
-        # fake_distribution[indexs2] = 4
-        # # # fake_distribution[:,-1] = 1
-        # Gclass_loss = self.kldiv(logit_f.softmax(-1), fake_distribution.softmax(-1)).mean()
-        # Gclass_loss =self.criterion(logit_f, y)
-        # G_loss = Greal_loss + Gclass_loss
-        # G_loss = Greal_loss + Gclass_loss
-        # G_loss = Greal_loss + Gclass_loss
-        G_loss = Greal_loss
+        fake_distribution = torch.ones_like(logit_f[:,:-1]) * -2
+        indexs = y.unsqueeze(1) == torch.arange(self.num_classes).type_as(y).unsqueeze(0)
+        indexs2 = newY.unsqueeze(1) == torch.arange(self.num_classes).type_as(y).unsqueeze(0)
+        fake_distribution[indexs] = 0.8
+        fake_distribution[indexs2] = 0.5
+        # fake_distribution[:,-1] = 1
+        Gclass_loss = self.kldiv(logit_f[:,:-1].softmax(-1), fake_distribution.softmax(-1)).mean()
+        G_loss = Greal_loss + Gclass_loss
+        # G_loss = Greal_loss
         opt_G.zero_grad()
         self.manual_backward(G_loss)
         opt_G.step()
         
         
-        #########################################$
+        #########################################$ s
         # update classifier
         #########################################$
         self.model.train()
@@ -446,55 +429,53 @@ class FG(LightningModule):
         requires_grad(self.D, False)
         requires_grad(self.model, True)
         real, noise, newY = self.model.block1_n(x, y)
-        fake = self.G(noise.detach())
+        fake = self.G(noise)
         l2 = self.model.block2(real)
-        emb_r = self.model.block3_(l2)
-        logit = self.model.fc(emb_r)
+        logit_r = self.model.block3(l2)
 
         l2_f = self.model.block2(fake.detach())
-        emb = self.model.block3_(l2_f)
-        logit_f = self.model.fc(emb)
+        logit_f = self.model.block3(l2_f)
         
-        Mclass_loss = self.criterion(logit, y)
-        
-        # fake_distribution = torch.ones_like(logit_f) * -2
-        # indexs = y.unsqueeze(1) == torch.arange(self.num_classes).type_as(y).unsqueeze(0)
-        # indexs2 = newY.unsqueeze(1) == torch.arange(self.num_classes).type_as(y).unsqueeze(0)
-        # fake_distribution[indexs] = 5
-        # fake_distribution[indexs2] = 5
-
-        # Mopen_loss = self.kldiv(logit_f.softmax(-1), fake_distribution.softmax(-1)).mean()
-        Mopen_loss = self.label_smoothing(logit_f, y)
-        # M_loss = Mclass_loss + Mopen_loss + Mclosed_loss
-        M_loss = Mclass_loss + Mopen_loss
+        Mclass_loss = self.criterion(logit_r, y)
+        # Mopen_loss = self.criterion(logit_f, torch.ones_like(y) * 6)
+        fake_distribution = torch.ones_like(logit_f) * -2
+        indexs = y.unsqueeze(1) == torch.arange(self.num_classes+1).type_as(y).unsqueeze(0)
+        indexs2 = newY.unsqueeze(1) == torch.arange(self.num_classes+1).type_as(y).unsqueeze(0)
+        fake_distribution[indexs] = 0.8
+        fake_distribution[indexs2] = 0.5
+        fake_distribution[:,-1] = 1
+        # if self.trainer.current_epoch > 100:
+        #     Mopen_loss = self.kldiv(logit_f.softmax(-1), fake_distribution.softmax(-1)).mean()
+        # else:
+        #     Mopen_loss = 0
+        Mopen_loss = self.kldiv(logit_f.softmax(-1), fake_distribution.softmax(-1)).mean()
+        M_loss = Mclass_loss + Mopen_loss * self.Mtemp
         opt_C.zero_grad()
         self.manual_backward(M_loss)
         opt_C.step()
         
         
         log_dict['loss/model known'] = Mclass_loss
-        # log_dict['loss/model open'] = Mopen_loss
-        # log_dict['loss/model closed'] = Mclosed_loss
+        log_dict['loss/model open'] = Mopen_loss
         log_dict['loss/G unkonwn'] = Gclass_loss
         log_dict['loss/G real'] = Greal_loss
-        log_dict['loss/G dist'] = dist_loss
-        log_dict['acc/train closed'] = accuracy(logit, y)[0].item()
-        # log_dict['acc/train open'] = accuracy(logit_f, 
-        #                                       torch.ones_like(y) * self.num_classes)[0].item()
+        log_dict['acc/train closed'] = accuracy(logit_r, y)[0].item()
+        log_dict['acc/train open'] = accuracy(logit_f, 
+                                              torch.ones_like(y) * self.num_classes)[0].item()
         
         self.log_dict(log_dict, on_step=True)
         
-        # if self.trainer.is_last_batch:
+        if self.trainer.is_last_batch:
 
-        #     wandb.log({
-        #         'img': [wandb.Image(real[0][0].detach().cpu().numpy(), caption='clean'),
-        #                 wandb.Image(noise[0][0].detach().cpu().numpy(), caption='noise'),
-        #                 wandb.Image(fake[0][0].detach().cpu().numpy(), caption='fake'),]
-        #     })
+            wandb.log({
+                'img': [wandb.Image(real[0][0].detach().cpu().numpy(), caption='clean'),
+                        wandb.Image(noise[0][0].detach().cpu().numpy(), caption='noise'),
+                        wandb.Image(fake[0][0].detach().cpu().numpy(), caption='fake'),]
+            })
             
         # if self.trainer.is_last_batch:
         #     scheduler.step()
-
+        
         return None
         
        
@@ -503,27 +484,16 @@ class FG(LightningModule):
         log_dict = {}
         if dataloader_idx == 0:
             x, y = batch
-            x = self.model.block1(x)
-            x = self.model.block2(x)
-            emb = self.model.block3_(x)
-            logit = self.model.fc(emb)
-            # open_ness = self.NewFC(emb)
-            out_dict['closed_out'] = logit
-            # out_dict['closed_openness'] = open_ness.squeeze()
+            out = self.model(x)
+            out_dict['closed_out'] = out
             out_dict['closed_y'] = y
-            # out_dict['closed_open_target'] = torch.ones_like(y)
-            loss = self.criterion(logit, y)
+            loss = self.criterion(out, y)
             log_dict['val/loss'] = loss
         elif dataloader_idx == 1:
-            x, y = batch
-            x = self.model.block1(x)
-            x = self.model.block2(x)
-            emb = self.model.block3_(x)
-            logit = self.model.fc(emb)
-            # open_ness = self.NewFC(emb)
-            out_dict['open_out'] = logit
-            # out_dict['open_openness'] = open_ness.squeeze()
-            out_dict['open_y'] = y
+            x, y, = batch
+            out = self.model(x)
+            out_dict['open_out'] = out
+            out_dict['open_y'] = torch.ones_like(y) * self.num_classes
         
         self.log_dict(log_dict)
         
@@ -535,73 +505,50 @@ class FG(LightningModule):
     
         c_out = torch.cat([logits['closed_out'] for logits in outputs[0]], dim=0)
         c_target = torch.cat([target['closed_y'] for target in outputs[0]], dim=0)
-        # c_open = torch.cat([target['closed_openness'] for target in outputs[0]], dim=0)
         o_out = torch.cat([logits['open_out'] for logits in outputs[1]], dim=0)
-        # o_open = torch.cat([logits['open_openness'] for logits in outputs[1]], dim=0)
         o_target = torch.cat([target['open_y'] for target in outputs[1]], dim=0)
         
         total_out = torch.cat([c_out, o_out], dim=0)
-        # total_open = torch.cat([c_open, o_open], dim=0)
+        total_target = torch.cat([c_target, o_target], dim=0)
         known_target = torch.ones_like(c_target)
         unknown_target = torch.zeros_like(o_target)
         auroc_target = torch.cat([known_target, unknown_target], dim=0)
         
-        softmax = self.auroc1(total_out.softmax(-1).max(-1)[0], auroc_target)
-        # open_logit = self.auroc2(total_open, auroc_target)
-        logit = self.auroc3(total_out.max(-1)[0], auroc_target)
+        softmax = self.auroc1(total_out.softmax(-1)[:,:-1].max(-1)[0], auroc_target)
+        open_logit = self.auroc2(total_out.softmax(-1)[:,-1], auroc_target)
+        logit = self.auroc3(total_out[:,:-1].max(-1)[0], auroc_target)
         
-        # f1_result = f1(total_out.max(-1)[1], total_target, average='macro', num_classes=self.num_classes+1)
+        f1_result = f1(total_out.max(-1)[1], total_target, average='macro', num_classes=self.num_classes+1)
         known_acc = accuracy(c_out, c_target)[0]
-        # unknown_acc = accuracy(total_open, )[0]
+        unknown_acc = accuracy(o_out, o_target)[0]
         
-        # f1_table = []
-        # soft_table = []
-        # logit_table = []
-        # closed_table = []
-        # open_table = []
-        # biases = np.arange(0, 1, 0.01)
-        # for bias in biases:
-        #     cal_out = calibrate_only(total_out, bias)
-        #     # f1_score_data = (f1(cal_out.max(-1)[1], total_target, average='macro', num_classes=self.num_classes+1) * 100).detach().cpu().numpy()
-        #     softmax_data = (self.auroc1(cal_out.softmax(-1)[:,:-1].max(-1)[0], auroc_target) * 100).detach().cpu().numpy()
-        #     logit_data = (self.auroc2(cal_out[:,:-1].max(-1)[0], auroc_target) * 100).detach().cpu().numpy()
-        #     closed_acc = accuracy(cal_out[:len(c_target)], c_target)[0].detach().cpu().numpy()
-        #     open_acc = accuracy(cal_out[len(c_target):], o_target)[0].detach().cpu().numpy()
-        #     f1_table.append(f1_score_data)
-        #     soft_table.append(softmax_data)
-        #     logit_table.append(logit_data)
-        #     closed_table.append(closed_acc)
-        #     open_table.append(open_acc)
-        #     del cal_out
+        f1_table = []
+        soft_table = []
+        logit_table = []
+        for bias in np.arange(0, 1, 0.01):
+            cal_out = calibrate_only(total_out, bias)
+            f1_score_data = f1(cal_out.max(-1)[1], total_target, average='macro', num_classes=self.num_classes+1)
+            softmax_data = self.auroc1(cal_out.softmax(-1)[:,:-1].max(-1)[0], auroc_target)
+            logit_data = self.auroc2(cal_out[:,:-1].max(-1)[0], auroc_target)
+            f1_table.append([bias], f1_score_data)
+            soft_table.append([bias], softmax_data)
+            logit_table.append([bias], logit_data)
+            del cal_out
+        f1_table = wandb.Table(data=f1_table, cloumns=['x', 'y'])
+        soft_table = wandb.Table(data=soft_table, cloumns=['x', 'y'])
+        logit_table = wandb.Table(data=logit_table, cloumns=['x', 'y'])
+        wandb.log({
+            "bias f1": wandb.plot.line(f1_table, "x", "y", title=f'f1 table on {self.tariner.current_epoch}'),
+            "bias soft": wandb.plot.line(soft_table, "x", "y", title=f'softmax table on {self.tariner.current_epoch}'),
+            "bias logit": wandb.plot.line(logit_table, "x", "y", title=f'logit table on {self.tariner.current_epoch}')
+        })
         
-        # plt.plot(biases, f1_table, label='f1')
-        # plt.plot(biases, soft_table, label='softmax')
-        # plt.plot(biases, logit_table, label='logit')
-        # plt.plot(biases, closed_table, label='closed')
-        # plt.plot(biases, open_table, label='open')
-        # plt.legend()
-        # wandb.log({
-        #     'calibration': wandb.Image(plt, caption='bias calibrate')})
-        # plt.clf()
-        # plt.cla()
-        # plt.close()
-        
-        
-        # f1_table = wandb.Table(data=f1_table, columns=['x', 'y'])
-        # soft_table = wandb.Table(data=soft_table, columns=['x', 'y'])
-        # logit_table = wandb.Table(data=logit_table, columns=['x', 'y'])
-        # wandb.log({
-        #     "bias f1": wandb.plot.line(f1_table, "x", "y", title=f'f1 table on {self.trainer.current_epoch}'),
-        #     "bias soft": wandb.plot.line(soft_table, "x", "y", title=f'softmax table on {self.trainer.current_epoch}'),
-        #     "bias logit": wandb.plot.line(logit_table, "x", "y", title=f'logit table on {self.trainer.current_epoch}')
-        # })
-
         log_dict = {
-            # 'val/f1': f1_result,
+            'val/f1': f1_result,
             'val/known acc': known_acc,
-            # 'val/unknown acc': unknown_acc,
+            'val/unknown acc': unknown_acc,
             'val/softmax': softmax,
-            # 'val/open_logit': open_logit,
+            'val/open_logit': open_logit,
             'val/logit': logit
         }
         self.log_dict(log_dict)
@@ -616,8 +563,8 @@ class FG(LightningModule):
         # optimizer = torch.optim.SGD(params, lr=self.lr, momentum=self.momentum, 
         #                              weight_decay=self.weight_decay)
         
-        C_params = list(self.model.parameters()) + list(self.NewFC.parameters())
-        optimizer = torch.optim.Adam(C_params,
+        # C_params = list(self.model.parameters()) + list(self.G.parameters())
+        optimizer = torch.optim.Adam(self.model.parameters(),
                                  lr=self.lr, weight_decay=self.weight_decay)
         
         # opt_G = torch.optim.Adam(self.G.parameters(), lr=0.001,
@@ -626,6 +573,7 @@ class FG(LightningModule):
         #                          betas=(0.5, 0.999))
         opt_G = torch.optim.RMSprop(self.G.parameters(), lr=1e-4, alpha=0.99)
         opt_D = torch.optim.RMSprop(self.D.parameters(), lr=1e-4, alpha=0.99)
+        
         
         # # REDUCE LR ON PLATEAU
         # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -735,7 +683,7 @@ class FG(LightningModule):
         parser.add_argument("--data_dir", type=str, default="/datasets")
         parser.add_argument("--class_split", type=int, default=0)
         
-        parser.add_argument("--alpha", type=float, default=1)
+        parser.add_argument("--alpha", type=float, default=0.5)
         parser.add_argument("--beta", type=float, default=1.0)
         parser.add_argument("--gan_lr", type=float, default=0.001)
         
@@ -751,20 +699,3 @@ def calibrate_only(o, bias, index=-1):
     a = o.clone()
     a[:,index] -= bias
     return a
-
-class LabelSmoothingLoss(nn.Module):
-    def __init__(self, classes, smoothing=0.0, dim=-1):
-        super(LabelSmoothingLoss, self).__init__()
-        self.confidence = 1.0 - smoothing
-        self.smoothing = smoothing
-        self.cls = classes
-        self.dim = dim
-
-    def forward(self, pred, target):
-        pred = pred.log_softmax(dim=self.dim)
-        with torch.no_grad():
-            # true_dist = pred.data.clone()
-            true_dist = torch.zeros_like(pred)
-            true_dist.fill_(self.smoothing / (self.cls - 1))
-            true_dist.scatter_(1, target.data.unsqueeze(1), self.confidence)
-        return torch.mean(torch.sum(-true_dist * pred, dim=self.dim))

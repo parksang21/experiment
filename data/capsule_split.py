@@ -28,6 +28,11 @@ cifar10 = {
     ]
 }
 
+# cifar10 = {
+    
+# }
+
+
 cifar_plus_10 = {
     'splits': [
         {'known_classes': [0, 1, 8, 9], 'unknown_classes': [26, 31, 34, 44, 45, 63, 65, 77, 93, 98]},
